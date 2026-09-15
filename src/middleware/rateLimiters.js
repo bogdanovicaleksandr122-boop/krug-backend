@@ -39,4 +39,13 @@ const paymentLimiter = rateLimit({
   message: { error: 'Слишком много запросов на оплату, попробуйте позже' },
 });
 
-module.exports = { generalLimiter, adminLoginLimiter, createSpecialistLimiter, paymentLimiter };
+// Лимит на обращения в поддержку — против спам-заливки чата поддержки
+const supportLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 час
+  max: 5, // максимум 5 обращений в час с одного IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Слишком много обращений подряд, попробуйте позже' },
+});
+
+module.exports = { generalLimiter, adminLoginLimiter, createSpecialistLimiter, paymentLimiter, supportLimiter };
