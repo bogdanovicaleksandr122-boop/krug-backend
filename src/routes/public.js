@@ -1,0 +1,89 @@
+const express = require('express');
+const prisma = require('../lib/prisma');
+
+const router = express.Router();
+
+// Список всех категорий с подкатегориями — для верхней ленты категорий
+router.get('/categories', async (req, res) => {
+  const categories = await prisma.category.findMany({
+    orderBy: { sortOrder: 'asc' },
+    include: { subcategories: { orderBy: { sortOrder: 'asc' } } },
+  });
+  res.json(categories);
+});
+
+// Список городов
+router.get('/cities', async (req, res) => {
+  const cities = await prisma.city.findMany({ orderBy: { sortOrder: 'asc' } });
+  res.json(cities);
+});
+
+// Публичный список специалистов — только опубликованные, с фильтрами
+router.get('/specialists', async (req, res) => {
+  const { subcategoryId, categoryId, cityId, search } = req.query;
+
+  const where = {
+    status: 'published',
+    ...(subcategoryId && { subcategoryId }),
+    ...(categoryId && { categoryId }),
+    ...(cityId && { cityId }),
+    ...(search && {
+      OR: [
+        { name: { contains: search, mode: 'insensitive' } },
+        { role: { contains: search, mode: 'insensitive' } },
+        { about: { contains: search, mode: 'insensitive' } },
+      ],
+    }),
+  };
+
+  const specialists = await prisma.specialist.findMany({ where });
+
+  // Честная сортировка: boosted (перемешаны случайно) → pro → остальные
+  const boosted = specialists.filter((s) => s.boosted);
+  const pro = specialists.filter((s) => !s.boosted && s.pro);
+  const rest = specialists.filter((s) => !s.boosted && !s.pro);
+  for (let i = boosted.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [boosted[i], boosted[j]] = [boosted[j], boosted[i]];
+  }
+
+  res.json([...boosted, ...pro, ...rest]);
+});
+
+// Карточка одного специалиста
+router.get('/specialists/:id', async (req, res) => {
+  const specialist = await prisma.specialist.findUnique({
+    where: { id: Number(req.params.id) },
+    include: { category: true, subcategory: true, city: true },
+  });
+  if (!specialist || specialist.status !== 'published') {
+    return res.status(404).json({ error: 'Анкета не найдена' });
+  }
+  res.json(specialist);
+});
+
+// Новая заявка от пользователя (мастер добавления из прототипа) — уходит на модерацию
+router.post('/specialists', async (req, res) => {
+  const {
+    name, langs, role, about, services,
+    contactsTelegram, contactsInstagram, contactsPhone, contactsWebsite,
+    locationAddress, cityId, categoryId, subcategoryId, telegramUserId,
+  } = req.body;
+
+  if (!name || !role || !categoryId || !subcategoryId) {
+    return res.status(400).json({ error: 'Не хватает обязательных полей' });
+  }
+
+  const specialist = await prisma.specialist.create({
+    data: {
+      name, langs, role, about, services,
+      contactsTelegram, contactsInstagram, contactsPhone, contactsWebsite,
+      locationAddress, cityId, categoryId, subcategoryId, telegramUserId,
+      status: 'pending',
+    },
+  });
+
+  res.status(201).json(specialist);
+});
+
+module.exports = router;

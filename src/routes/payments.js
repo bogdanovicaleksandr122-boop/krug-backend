@@ -1,0 +1,92 @@
+const express = require('express');
+const fetch = require('node-fetch');
+const prisma = require('../lib/prisma');
+const { telegramAuth } = require('../middleware/telegramAuth');
+
+const router = express.Router();
+
+// Цены — те же, что были в прототипе
+const PRO_PRICE = 500; // Stars в месяц
+const BOOST_PRICES = { 7: 200, 30: 600 }; // Stars за срок в днях
+
+async function callTelegram(method, payload) {
+  const response = await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/${method}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return response.json();
+}
+
+// Покупка PRO — доступна только подтверждённому владельцу анкеты (verified)
+router.post('/specialists/:id/purchase-pro', telegramAuth, async (req, res) => {
+  const specialist = await prisma.specialist.findUnique({ where: { id: Number(req.params.id) } });
+  if (!specialist || !specialist.verified || specialist.telegramUserId !== String(req.telegramUser.id)) {
+    return res.status(403).json({ error: 'Купить PRO может только подтверждённый владелец анкеты' });
+  }
+
+  const invoice = await callTelegram('createInvoiceLink', {
+    title: 'PRO-подписка КРУГ',
+    description: `PRO-статус для анкеты «${specialist.name}» на 1 месяц`,
+    payload: `pro:${specialist.id}`,
+    currency: 'XTR',
+    prices: [{ label: 'PRO, 1 месяц', amount: PRO_PRICE }],
+  });
+
+  res.json(invoice);
+});
+
+// Покупка Буста
+router.post('/specialists/:id/purchase-boost', telegramAuth, async (req, res) => {
+  const { days } = req.body; // 7 или 30
+  const price = BOOST_PRICES[days];
+  if (!price) return res.status(400).json({ error: 'Некорректный срок буста' });
+
+  const specialist = await prisma.specialist.findUnique({ where: { id: Number(req.params.id) } });
+  if (!specialist || !specialist.verified || specialist.telegramUserId !== String(req.telegramUser.id)) {
+    return res.status(403).json({ error: 'Купить буст может только подтверждённый владелец анкеты' });
+  }
+
+  const invoice = await callTelegram('createInvoiceLink', {
+    title: 'Буст анкеты КРУГ',
+    description: `Буст анкеты «${specialist.name}» на ${days} дней`,
+    payload: `boost:${specialist.id}:${days}`,
+    currency: 'XTR',
+    prices: [{ label: `Буст, ${days} дней`, amount: price }],
+  });
+
+  res.json(invoice);
+});
+
+// Webhook от Telegram: сюда придут все апдейты бота, нас интересует successful_payment
+router.post('/telegram/webhook', async (req, res) => {
+  const message = req.body?.message;
+  const payment = message?.successful_payment;
+
+  if (payment) {
+    const [type, specialistId, days] = payment.invoice_payload.split(':');
+    const id = Number(specialistId);
+
+    if (type === 'pro') {
+      const proExpiresAt = new Date();
+      proExpiresAt.setMonth(proExpiresAt.getMonth() + 1);
+      await prisma.specialist.update({ where: { id }, data: { pro: true, proExpiresAt } });
+      await prisma.payment.create({
+        data: { specialistId: id, type: 'pro', starsAmount: payment.total_amount, telegramPaymentChargeId: payment.telegram_payment_charge_id },
+      });
+    }
+
+    if (type === 'boost') {
+      const boostedUntil = new Date();
+      boostedUntil.setDate(boostedUntil.getDate() + Number(days));
+      await prisma.specialist.update({ where: { id }, data: { boosted: true, boostedUntil } });
+      await prisma.payment.create({
+        data: { specialistId: id, type: 'boost', starsAmount: payment.total_amount, durationDays: Number(days), telegramPaymentChargeId: payment.telegram_payment_charge_id },
+      });
+    }
+  }
+
+  res.sendStatus(200);
+});
+
+module.exports = router;

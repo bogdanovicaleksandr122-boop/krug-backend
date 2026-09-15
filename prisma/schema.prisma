@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Category {
+  id            String        @id
+  label         String
+  icon          String
+  sortOrder     Int           @default(0)
+  subcategories Subcategory[]
+  specialists   Specialist[]
+}
+
+model Subcategory {
+  id          String       @id
+  categoryId  String
+  label       String
+  sortOrder   Int          @default(0)
+  category    Category     @relation(fields: [categoryId], references: [id])
+  specialists Specialist[]
+}
+
+model City {
+  id          String       @id
+  label       String
+  country     String       @default("Bulgaria")
+  sortOrder   Int          @default(0)
+  isDefault   Boolean      @default(false)
+  specialists Specialist[]
+}
+
+enum SpecialistStatus {
+  pending
+  published
+  rejected
+}
+
+model Specialist {
+  id                Int               @id @default(autoincrement())
+  telegramUserId    String?
+  name              String
+  langs             Json
+  role              String
+  about             String
+  services          Json
+  contactsTelegram  String?
+  contactsInstagram String?
+  contactsPhone     String?
+  contactsWebsite   String?
+  locationAddress   String?
+  cityId            String?
+  categoryId        String
+  subcategoryId     String
+  status            SpecialistStatus @default(pending)
+  rejectionReason   String?
+  verified          Boolean          @default(false)
+  pro               Boolean          @default(false)
+  proExpiresAt      DateTime?
+  boosted           Boolean          @default(false)
+  boostedUntil      DateTime?
+  photoFileId       String?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  category       Category        @relation(fields: [categoryId], references: [id])
+  subcategory    Subcategory     @relation(fields: [subcategoryId], references: [id])
+  city           City?           @relation(fields: [cityId], references: [id])
+  favorites      Favorite[]
+  payments       Payment[]
+  moderationLogs ModerationLog[]
+}
+
+model Favorite {
+  telegramUserId String
+  specialistId   Int
+  createdAt      DateTime   @default(now())
+  specialist     Specialist @relation(fields: [specialistId], references: [id])
+
+  @@id([telegramUserId, specialistId])
+}
+
+model Admin {
+  id           Int    @id @default(autoincrement())
+  username     String @unique
+  passwordHash String
+  role         String @default("moderator")
+}
+
+enum PaymentType {
+  pro
+  boost
+}
+
+model Payment {
+  id                      Int         @id @default(autoincrement())
+  specialistId            Int
+  type                    PaymentType
+  starsAmount             Int
+  durationDays            Int?
+  telegramPaymentChargeId String?
+  createdAt               DateTime    @default(now())
+  specialist              Specialist  @relation(fields: [specialistId], references: [id])
+}
+
+model ModerationLog {
+  id           Int        @id @default(autoincrement())
+  specialistId Int
+  adminId      Int?
+  action       String
+  reason       String?
+  createdAt    DateTime   @default(now())
+  specialist   Specialist @relation(fields: [specialistId], references: [id])
+}
