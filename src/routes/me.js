@@ -1,9 +1,14 @@
 const express = require('express');
 const prisma = require('../lib/prisma');
 const { telegramAuth } = require('../middleware/telegramAuth');
+const { uploadPhotoToTelegram } = require('../lib/telegramFiles');
 
 const router = express.Router();
 router.use(telegramAuth); // все роуты в этом файле требуют подтверждённой личности из Telegram
+
+function ensureOwnership(specialist, telegramUser) {
+  return !!specialist && specialist.telegramUserId === String(telegramUser.id);
+}
 
 // Подтверждение владения анкетой ("это я")
 router.post('/specialists/:id/claim', async (req, res) => {
@@ -35,6 +40,73 @@ router.get('/specialists', async (req, res) => {
     where: { telegramUserId: String(req.telegramUser.id) },
   });
   res.json(specialists);
+});
+
+const OWNER_EDITABLE_FIELDS = [
+  'name', 'langs', 'about', 'services',
+  'contactsTelegram', 'contactsInstagram', 'contactsPhone', 'contactsWebsite',
+  'locationAddress', 'cityId',
+];
+
+// Владелец редактирует свою анкету. Правки не применяются сразу — они складываются
+// в pendingChanges и уходят на проверку модератору (статус анкеты становится pending,
+// поэтому на время проверки она пропадает из общего каталога). Живые данные не трогаем,
+// чтобы при отклонении правок можно было просто откатиться к тому, что было.
+router.put('/specialists/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const specialist = await prisma.specialist.findUnique({ where: { id } });
+  if (!ensureOwnership(specialist, req.telegramUser)) {
+    return res.status(403).json({ error: 'Редактировать может только подтверждённый владелец анкеты' });
+  }
+  const changes = {};
+  OWNER_EDITABLE_FIELDS.forEach((key) => {
+    if (key in req.body) changes[key] = req.body[key];
+  });
+  if (!Object.keys(changes).length) {
+    return res.status(400).json({ error: 'Нет изменений для сохранения' });
+  }
+  const pendingChanges = { ...(specialist.pendingChanges || {}), ...changes };
+  const updated = await prisma.specialist.update({
+    where: { id },
+    data: { pendingChanges, status: 'pending' },
+  });
+  res.json({ ok: true, specialist: updated });
+});
+
+// Владелец удаляет свою анкету — сразу, без подтверждения модератором
+router.delete('/specialists/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const specialist = await prisma.specialist.findUnique({ where: { id } });
+  if (!ensureOwnership(specialist, req.telegramUser)) {
+    return res.status(403).json({ error: 'Удалить может только подтверждённый владелец анкеты' });
+  }
+  await prisma.specialist.delete({ where: { id } });
+  res.status(204).end();
+});
+
+// Владелец загружает фото. Тоже уходит на проверку вместе с остальными правками —
+// сама загрузка в Telegram происходит сразу, но анкета покажет новое фото публично
+// только после одобрения администратором.
+router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb' }), async (req, res) => {
+  const id = Number(req.params.id);
+  const specialist = await prisma.specialist.findUnique({ where: { id } });
+  if (!ensureOwnership(specialist, req.telegramUser)) {
+    return res.status(403).json({ error: 'Загружать фото может только подтверждённый владелец анкеты' });
+  }
+  if (!req.body || !req.body.length) {
+    return res.status(400).json({ error: 'Файл не получен' });
+  }
+  try {
+    const fileId = await uploadPhotoToTelegram(req.body, req.headers['content-type'], req.telegramUser.id);
+    const pendingChanges = { ...(specialist.pendingChanges || {}), photoFileId: fileId };
+    const updated = await prisma.specialist.update({
+      where: { id },
+      data: { pendingChanges, status: 'pending' },
+    });
+    res.json({ ok: true, specialist: updated });
+  } catch (e) {
+    res.status(502).json({ error: 'Не удалось загрузить фото в Telegram: ' + e.message });
+  }
 });
 
 // Избранное
