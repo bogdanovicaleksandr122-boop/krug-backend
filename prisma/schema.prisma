@@ -64,6 +64,7 @@ model Specialist {
   boosted           Boolean          @default(false)
   boostedUntil      DateTime?
   photoFileId       String?
+  pendingChanges    Json?
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
 
