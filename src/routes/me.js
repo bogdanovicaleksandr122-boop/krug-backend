@@ -2,6 +2,7 @@ const express = require('express');
 const prisma = require('../lib/prisma');
 const { telegramAuth } = require('../middleware/telegramAuth');
 const { uploadPhotoToTelegram } = require('../lib/telegramFiles');
+const { supportLimiter } = require('../middleware/rateLimiters');
 
 const router = express.Router();
 router.use(telegramAuth); // все роуты в этом файле требуют подтверждённой личности из Telegram
@@ -143,6 +144,43 @@ router.get('/favorites', async (req, res) => {
     include: { specialist: true },
   });
   res.json(favorites.map((f) => f.specialist));
+});
+
+// Обращение в поддержку из раздела "Поддержка". Пересылаем сообщение владельцу
+// приложения в Telegram — отдельного интерфейса для тикетов пока нет, а личный
+// чат владельца (тот же SUPPORT_CHAT_ID / TELEGRAM_FILE_RELAY_CHAT_ID, что уже
+// используется для загрузки фото без владельца) для старта вполне достаточен.
+router.post('/support', supportLimiter, async (req, res) => {
+  const { topic, message } = req.body;
+  if (!topic || !message || !String(message).trim()) {
+    return res.status(400).json({ error: 'Нужны тема и текст обращения' });
+  }
+  const chatId = process.env.SUPPORT_CHAT_ID || process.env.TELEGRAM_FILE_RELAY_CHAT_ID;
+  if (!chatId) {
+    return res.status(500).json({ error: 'Поддержка временно недоступна — не задан адрес получателя на сервере' });
+  }
+  const u = req.telegramUser;
+  const from = u.username ? `@${u.username}` : `id ${u.id}`;
+  const text = [
+    '🆘 Обращение в поддержку КРУГ',
+    `Тема: ${topic}`,
+    `От: ${from} (${[u.first_name, u.last_name].filter(Boolean).join(' ') || 'без имени'})`,
+    '',
+    String(message).trim(),
+  ].join('\n');
+
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text }),
+    });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.description || 'Telegram отклонил сообщение');
+    res.status(201).json({ ok: true });
+  } catch (e) {
+    res.status(502).json({ error: 'Не удалось отправить обращение: ' + e.message });
+  }
 });
 
 module.exports = router;
