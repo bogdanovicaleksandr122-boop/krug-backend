@@ -2,8 +2,15 @@ const express = require('express');
 const prisma = require('../lib/prisma');
 const { createSpecialistLimiter } = require('../middleware/rateLimiters');
 const { streamTelegramFile } = require('../lib/telegramFiles');
+const { telegramAuth } = require('../middleware/telegramAuth');
+const { toPublicId } = require('../lib/publicId');
 
 const router = express.Router();
+
+// Добавляет публичный номер анкеты (см. lib/publicId.js) в объект перед отправкой клиенту.
+function withPublicId(specialist) {
+  return { ...specialist, publicId: toPublicId(specialist.id) };
+}
 
 // Список всех категорий с подкатегориями — для верхней ленты категорий
 router.get('/categories', async (req, res) => {
@@ -49,7 +56,7 @@ router.get('/specialists', async (req, res) => {
     [boosted[i], boosted[j]] = [boosted[j], boosted[i]];
   }
 
-  res.json([...boosted, ...pro, ...rest]);
+  res.json([...boosted, ...pro, ...rest].map(withPublicId));
 });
 
 // Карточка одного специалиста
@@ -61,16 +68,20 @@ router.get('/specialists/:id', async (req, res) => {
   if (!specialist || specialist.status !== 'published') {
     return res.status(404).json({ error: 'Анкета не найдена' });
   }
-  res.json(specialist);
+  res.json(withPublicId(specialist));
 });
 
 // Новая заявка от пользователя (мастер добавления из прототипа) — уходит на модерацию.
 // createSpecialistLimiter не даёт заваливать каталог спамом: не больше 10 заявок в час с одного адреса.
-router.post('/specialists', createSpecialistLimiter, async (req, res) => {
+// telegramAuth теперь обязателен: раньше telegramUserId принимался прямо из тела запроса
+// (клиент мог прислать любое значение или вообще ничего — на практике фронт его никогда
+// не отправлял, поэтому у анкет никогда не было известно, кто их подал). Теперь id
+// заявителя всегда берётся из проверенной подписи initData, подделать нельзя.
+router.post('/specialists', createSpecialistLimiter, telegramAuth, async (req, res) => {
   const {
     name, langs, role, about, services,
     contactsTelegram, contactsInstagram, contactsPhone, contactsWebsite,
-    locationAddress, cityId, categoryId, subcategoryId, telegramUserId,
+    locationAddress, cityId, categoryId, subcategoryId,
   } = req.body;
 
   if (!name || !role || !categoryId || !subcategoryId) {
@@ -81,12 +92,13 @@ router.post('/specialists', createSpecialistLimiter, async (req, res) => {
     data: {
       name, langs, role, about, services,
       contactsTelegram, contactsInstagram, contactsPhone, contactsWebsite,
-      locationAddress, cityId, categoryId, subcategoryId, telegramUserId,
+      locationAddress, cityId, categoryId, subcategoryId,
+      telegramUserId: String(req.telegramUser.id),
       status: 'pending',
     },
   });
 
-  res.status(201).json(specialist);
+  res.status(201).json(withPublicId(specialist));
 });
 
 // Фото специалиста — проксируем через себя (напрямую отдавать ссылку Telegram нельзя,
