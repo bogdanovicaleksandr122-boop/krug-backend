@@ -4,6 +4,7 @@ const { parse } = require('csv-parse/sync');
 const prisma = require('../lib/prisma');
 const adminAuth = require('../middleware/adminAuth');
 const { adminLoginLimiter } = require('../middleware/rateLimiters');
+const { uploadPhotoToTelegram, streamTelegramFile } = require('../lib/telegramFiles');
 
 const router = express.Router();
 
@@ -34,23 +35,35 @@ router.get('/pending', async (req, res) => {
 
 router.post('/specialists/:id/approve', async (req, res) => {
   const id = Number(req.params.id);
-  const specialist = await prisma.specialist.update({
-    where: { id },
-    data: { status: 'published' },
-  });
+  const specialist = await prisma.specialist.findUnique({ where: { id } });
+  if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
+
+  // Если это была правка уже опубликованной анкеты (pendingChanges) — применяем
+  // накопленные изменения к живым полям. Если это новая заявка — просто публикуем.
+  const data = specialist.pendingChanges
+    ? { ...specialist.pendingChanges, status: 'published', pendingChanges: null }
+    : { status: 'published' };
+
+  const updated = await prisma.specialist.update({ where: { id }, data });
   await prisma.moderationLog.create({ data: { specialistId: id, action: 'approve' } });
-  res.json(specialist);
+  res.json(updated);
 });
 
 router.post('/specialists/:id/reject', async (req, res) => {
   const id = Number(req.params.id);
   const { reason } = req.body;
-  const specialist = await prisma.specialist.update({
-    where: { id },
-    data: { status: 'rejected', rejectionReason: reason || 'Без указания причины' },
-  });
+  const specialist = await prisma.specialist.findUnique({ where: { id } });
+  if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
+
+  // Отклонение правки уже опубликованной анкеты — просто отбрасываем предложенные
+  // изменения и возвращаем анкету как было, без статуса "отклонено".
+  const data = specialist.pendingChanges
+    ? { pendingChanges: null, status: 'published' }
+    : { status: 'rejected', rejectionReason: reason || 'Без указания причины' };
+
+  const updated = await prisma.specialist.update({ where: { id }, data });
   await prisma.moderationLog.create({ data: { specialistId: id, action: 'reject', reason } });
-  res.json(specialist);
+  res.json(updated);
 });
 
 /* ================= Полное управление анкетами ================= */
@@ -120,6 +133,7 @@ router.post('/specialists', async (req, res) => {
 router.put('/specialists/:id', async (req, res) => {
   const id = Number(req.params.id);
   const data = pickEditableFields(req.body);
+  data.pendingChanges = null; // ручное редактирование админом отменяет любые несогласованные правки владельца
   try {
     const specialist = await prisma.specialist.update({ where: { id }, data });
     await prisma.moderationLog.create({ data: { specialistId: id, action: 'admin-edit' } });
@@ -137,6 +151,40 @@ router.delete('/specialists/:id', async (req, res) => {
   } catch (e) {
     res.status(400).json({ error: 'Не удалось удалить анкету' });
   }
+});
+
+// Загрузка фото админом — применяется сразу, без очереди модерации (в отличие от
+// фото, которое загружает сам владелец через /api/me/...). Получателем в Telegram,
+// через которого фото прогоняется, чтобы получить file_id, выступает владелец анкеты,
+// если он уже известен, иначе — служебный чат из TELEGRAM_FILE_RELAY_CHAT_ID.
+router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb' }), async (req, res) => {
+  const id = Number(req.params.id);
+  const specialist = await prisma.specialist.findUnique({ where: { id } });
+  if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
+  if (!req.body || !req.body.length) return res.status(400).json({ error: 'Файл не получен' });
+
+  const chatId = specialist.telegramUserId || process.env.TELEGRAM_FILE_RELAY_CHAT_ID;
+  if (!chatId) {
+    return res.status(400).json({
+      error: 'Нет получателя для загрузки фото в Telegram — задайте переменную TELEGRAM_FILE_RELAY_CHAT_ID в Railway (ваш личный Telegram id) или сначала свяжите анкету с владельцем',
+    });
+  }
+  try {
+    const fileId = await uploadPhotoToTelegram(req.body, req.headers['content-type'], chatId);
+    const updated = await prisma.specialist.update({ where: { id }, data: { photoFileId: fileId } });
+    res.json({ ok: true, specialist: updated });
+  } catch (e) {
+    res.status(502).json({ error: 'Не удалось загрузить фото: ' + e.message });
+  }
+});
+
+// Превью фото, которое ещё не одобрено (лежит в pendingChanges) — только для админки,
+// публично оно не отдаётся, пока анкету не одобрят.
+router.get('/specialists/:id/pending-photo', async (req, res) => {
+  const specialist = await prisma.specialist.findUnique({ where: { id: Number(req.params.id) } });
+  const fileId = specialist && specialist.pendingChanges && specialist.pendingChanges.photoFileId;
+  if (!fileId) return res.status(404).json({ error: 'Нет фото на проверке' });
+  await streamTelegramFile(fileId, res);
 });
 
 /* ================= Категории / города (редактирование) ================= */
