@@ -2,12 +2,14 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const prisma = require('../lib/prisma');
 const adminAuth = require('../middleware/adminAuth');
+const { adminLoginLimiter } = require('../middleware/rateLimiters');
 
 const router = express.Router();
 
 // Вход в админку. Для простоты старта — один логин/пароль из переменных окружения
 // (не из базы). Когда появится несколько модераторов, легко переключить на таблицу Admin + bcrypt.
-router.post('/login', (req, res) => {
+// adminLoginLimiter не даёт перебирать пароль: не больше 5 попыток за 15 минут с одного адреса.
+router.post('/login', adminLoginLimiter, (req, res) => {
   const { username, password } = req.body;
   if (username !== process.env.ADMIN_USERNAME || password !== process.env.ADMIN_PASSWORD) {
     return res.status(401).json({ error: 'Неверный логин или пароль' });
