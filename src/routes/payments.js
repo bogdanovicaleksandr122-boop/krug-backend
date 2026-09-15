@@ -1,7 +1,7 @@
 const express = require('express');
-const fetch = require('node-fetch');
 const prisma = require('../lib/prisma');
 const { telegramAuth } = require('../middleware/telegramAuth');
+const { paymentLimiter } = require('../middleware/rateLimiters');
 
 const router = express.Router();
 
@@ -10,6 +10,9 @@ const PRO_PRICE = 500; // Stars в месяц
 const BOOST_PRICES = { 7: 200, 30: 600 }; // Stars за срок в днях
 
 async function callTelegram(method, payload) {
+  // В Node 18+ (у вас на Railway — Node 24) функция fetch встроена в сам Node.js,
+  // отдельный пакет node-fetch не нужен и как раз он ломал запрос ошибкой
+  // "fetch is not a function" — пакет node-fetch версии 3 нельзя подключать через require().
   const response = await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -19,7 +22,7 @@ async function callTelegram(method, payload) {
 }
 
 // Покупка PRO — доступна только подтверждённому владельцу анкеты (verified)
-router.post('/specialists/:id/purchase-pro', telegramAuth, async (req, res) => {
+router.post('/specialists/:id/purchase-pro', paymentLimiter, telegramAuth, async (req, res) => {
   const specialist = await prisma.specialist.findUnique({ where: { id: Number(req.params.id) } });
   if (!specialist || !specialist.verified || specialist.telegramUserId !== String(req.telegramUser.id)) {
     return res.status(403).json({ error: 'Купить PRO может только подтверждённый владелец анкеты' });
@@ -37,7 +40,7 @@ router.post('/specialists/:id/purchase-pro', telegramAuth, async (req, res) => {
 });
 
 // Покупка Буста
-router.post('/specialists/:id/purchase-boost', telegramAuth, async (req, res) => {
+router.post('/specialists/:id/purchase-boost', paymentLimiter, telegramAuth, async (req, res) => {
   const { days } = req.body; // 7 или 30
   const price = BOOST_PRICES[days];
   if (!price) return res.status(400).json({ error: 'Некорректный срок буста' });
@@ -58,8 +61,17 @@ router.post('/specialists/:id/purchase-boost', telegramAuth, async (req, res) =>
   res.json(invoice);
 });
 
-// Webhook от Telegram: сюда придут все апдейты бота, нас интересует successful_payment
+// Webhook от Telegram: сюда придут все апдейты бота, нас интересует successful_payment.
+// Проверяем секретный токен — без этого кто угодно мог бы дёрнуть этот адрес напрямую
+// и притвориться, что оплата прошла, получив себе бесплатный PRO/буст.
+// Секрет задаётся один раз при регистрации вебхука (см. инструкцию ниже) и
+// должен совпадать с переменной TELEGRAM_WEBHOOK_SECRET в Railway.
 router.post('/telegram/webhook', async (req, res) => {
+  const secret = req.headers['x-telegram-bot-api-secret-token'];
+  if (!process.env.TELEGRAM_WEBHOOK_SECRET || secret !== process.env.TELEGRAM_WEBHOOK_SECRET) {
+    return res.sendStatus(401);
+  }
+
   const message = req.body?.message;
   const payment = message?.successful_payment;
 
