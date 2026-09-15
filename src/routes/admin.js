@@ -217,6 +217,30 @@ router.put('/subcategories/:id', async (req, res) => {
   }
 });
 
+// Создание города вручную (без CSV) — например, чтобы завести новую страну
+// с несколькими городами ещё до того, как в ней появятся первые анкеты.
+router.post('/cities', async (req, res) => {
+  const { label, country, sortOrder, isDefault } = req.body;
+  if (!label || !country) {
+    return res.status(400).json({ error: 'Нужны название города и страна' });
+  }
+  try {
+    const base = slugify(label); // slugify объявлена ниже в этом же файле (function-декларации поднимаются наверх)
+    let id = base;
+    let n = 2;
+    while (await prisma.city.findUnique({ where: { id } })) {
+      id = `${base}-${n}`;
+      n += 1;
+    }
+    const city = await prisma.city.create({
+      data: { id, label, country, sortOrder: Number(sortOrder) || 0, isDefault: !!isDefault },
+    });
+    res.status(201).json(city);
+  } catch (e) {
+    res.status(400).json({ error: 'Не удалось создать город: ' + e.message });
+  }
+});
+
 router.put('/cities/:id', async (req, res) => {
   const { label, country, sortOrder, isDefault } = req.body;
   const data = {};
