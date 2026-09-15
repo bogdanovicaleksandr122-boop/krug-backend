@@ -1,7 +1,9 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const prisma = require('./lib/prisma');
+const { generalLimiter } = require('./middleware/rateLimiters');
 
 const publicRoutes = require('./routes/public');
 const meRoutes = require('./routes/me');
@@ -9,8 +11,36 @@ const adminRoutes = require('./routes/admin');
 const paymentRoutes = require('./routes/payments');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// Railway ставит своё прокси перед приложением. Без этой строки все запросы
+// будут выглядеть так, будто идут с одного и того же адреса (адреса прокси),
+// и лимит запросов ниже перестанет иметь смысл.
+app.set('trust proxy', 1);
+
+// Базовые защитные заголовки (не даём браузеру угадывать тип контента,
+// запрещаем встраивать сайт в чужие фреймы и т.п.) — стандартная практика.
+app.use(helmet());
+
+// Ограничиваем, каким сайтам разрешено обращаться к API напрямую из браузера.
+// Впишите в Railway переменную окружения ALLOWED_ORIGINS, например:
+//   ALLOWED_ORIGINS=https://ваш-логин.github.io
+// Можно перечислить несколько адресов через запятую.
+// Пока переменная не задана, API временно принимает запросы с любого сайта —
+// чтобы ничего не сломать прямо сейчас, но это стоит поправить.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+if (allowedOrigins.length === 0) {
+  console.warn('ALLOWED_ORIGINS не задан — API принимает запросы с любого сайта. Задайте переменную в Railway.');
+}
+app.use(cors(allowedOrigins.length ? { origin: allowedOrigins } : undefined));
+
+// Ограничиваем размер тела запроса — защита от заваливания сервера огромными запросами
+app.use(express.json({ limit: '200kb' }));
+
+// Общий лимит запросов на весь API
+app.use('/api', generalLimiter);
 
 app.use('/api', publicRoutes);
 app.use('/api/me', meRoutes);
@@ -25,6 +55,16 @@ setInterval(async () => {
   await prisma.specialist.updateMany({ where: { pro: true, proExpiresAt: { lt: now } }, data: { pro: false } });
   await prisma.specialist.updateMany({ where: { boosted: true, boostedUntil: { lt: now } }, data: { boosted: false } });
 }, 60 * 60 * 1000);
+
+// Всё, что не подошло ни под один роут
+app.use((req, res) => res.status(404).json({ error: 'Не найдено' }));
+
+// Общий обработчик ошибок — не даём деталям внутренней ошибки (например, текст SQL-запроса)
+// утечь наружу в ответе; полный текст ошибки всё равно попадает в логи Railway.
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+});
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`КРУГ backend запущен на порту ${port}`));
