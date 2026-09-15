@@ -1,5 +1,6 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const { parse } = require('csv-parse/sync');
 const prisma = require('../lib/prisma');
 const adminAuth = require('../middleware/adminAuth');
 const { adminLoginLimiter } = require('../middleware/rateLimiters');
@@ -20,7 +21,8 @@ router.post('/login', adminLoginLimiter, (req, res) => {
 
 router.use(adminAuth); // всё, что ниже, требует токен
 
-// Заявки, ожидающие проверки
+/* ================= Заявки на проверке (очередь модерации) ================= */
+
 router.get('/pending', async (req, res) => {
   const pending = await prisma.specialist.findMany({
     where: { status: 'pending' },
@@ -36,9 +38,7 @@ router.post('/specialists/:id/approve', async (req, res) => {
     where: { id },
     data: { status: 'published' },
   });
-  await prisma.moderationLog.create({
-    data: { specialistId: id, action: 'approve' },
-  });
+  await prisma.moderationLog.create({ data: { specialistId: id, action: 'approve' } });
   res.json(specialist);
 });
 
@@ -49,16 +49,370 @@ router.post('/specialists/:id/reject', async (req, res) => {
     where: { id },
     data: { status: 'rejected', rejectionReason: reason || 'Без указания причины' },
   });
-  await prisma.moderationLog.create({
-    data: { specialistId: id, action: 'reject', reason },
-  });
+  await prisma.moderationLog.create({ data: { specialistId: id, action: 'reject', reason } });
   res.json(specialist);
 });
 
-// Массовая загрузка через CSV: заглушка на будущее.
-// Ожидаемые колонки — те же поля, что в форме добавления специалиста.
-router.post('/specialists/bulk-csv', async (req, res) => {
-  res.status(501).json({ error: 'Массовая загрузка ещё не реализована' });
+/* ================= Полное управление анкетами ================= */
+
+// Список всех анкет (любой статус) — с фильтрами по статусу и текстовому поиску
+router.get('/specialists', async (req, res) => {
+  const { status, search } = req.query;
+  const where = {};
+  if (status) where.status = status;
+  if (search) {
+    where.OR = [
+      { name: { contains: search, mode: 'insensitive' } },
+      { role: { contains: search, mode: 'insensitive' } },
+    ];
+  }
+  const specialists = await prisma.specialist.findMany({
+    where,
+    include: { category: true, subcategory: true, city: true },
+    orderBy: { createdAt: 'desc' },
+  });
+  res.json(specialists);
+});
+
+router.get('/specialists/:id', async (req, res) => {
+  const specialist = await prisma.specialist.findUnique({
+    where: { id: Number(req.params.id) },
+    include: { category: true, subcategory: true, city: true },
+  });
+  if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
+  res.json(specialist);
+});
+
+const EDITABLE_FIELDS = [
+  'name', 'role', 'about', 'langs', 'services',
+  'contactsTelegram', 'contactsInstagram', 'contactsPhone', 'contactsWebsite',
+  'locationAddress', 'cityId', 'categoryId', 'subcategoryId', 'status', 'rejectionReason',
+  'verified', 'pro', 'proExpiresAt', 'boosted', 'boostedUntil',
+];
+
+function pickEditableFields(body) {
+  const data = {};
+  EDITABLE_FIELDS.forEach((key) => {
+    if (key in body) data[key] = body[key];
+  });
+  if (data.proExpiresAt) data.proExpiresAt = new Date(data.proExpiresAt);
+  if (data.boostedUntil) data.boostedUntil = new Date(data.boostedUntil);
+  return data;
+}
+
+// Ручное создание анкеты админом — в отличие от публичной формы, здесь можно сразу
+// указать статус published и вручную выставить verified/pro/boosted без оплаты.
+router.post('/specialists', async (req, res) => {
+  const data = pickEditableFields(req.body);
+  if (!data.name || !data.role || !data.categoryId || !data.subcategoryId) {
+    return res.status(400).json({ error: 'Не хватает обязательных полей (имя, специализация, категория, подкатегория)' });
+  }
+  try {
+    const specialist = await prisma.specialist.create({ data: { status: 'published', ...data } });
+    res.status(201).json(specialist);
+  } catch (e) {
+    res.status(400).json({ error: 'Не удалось создать анкету: ' + e.message });
+  }
+});
+
+// Полное ручное редактирование анкеты — админ может менять любое поле,
+// включая verified/pro/boosted без прохождения оплаты пользователем
+router.put('/specialists/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const data = pickEditableFields(req.body);
+  try {
+    const specialist = await prisma.specialist.update({ where: { id }, data });
+    await prisma.moderationLog.create({ data: { specialistId: id, action: 'admin-edit' } });
+    res.json(specialist);
+  } catch (e) {
+    res.status(400).json({ error: 'Не удалось сохранить: ' + e.message });
+  }
+});
+
+router.delete('/specialists/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    await prisma.specialist.delete({ where: { id } });
+    res.status(204).end();
+  } catch (e) {
+    res.status(400).json({ error: 'Не удалось удалить анкету' });
+  }
+});
+
+/* ================= Категории / города (редактирование) ================= */
+// Списки для чтения отдаются публичными /api/categories и /api/cities — здесь только запись.
+
+router.put('/categories/:id', async (req, res) => {
+  const { label, icon, sortOrder } = req.body;
+  const data = {};
+  if (label !== undefined) data.label = label;
+  if (icon !== undefined) data.icon = icon;
+  if (sortOrder !== undefined) data.sortOrder = Number(sortOrder);
+  try {
+    const category = await prisma.category.update({ where: { id: req.params.id }, data });
+    res.json(category);
+  } catch (e) {
+    res.status(400).json({ error: 'Не удалось сохранить категорию' });
+  }
+});
+
+router.put('/subcategories/:id', async (req, res) => {
+  const { label, sortOrder } = req.body;
+  const data = {};
+  if (label !== undefined) data.label = label;
+  if (sortOrder !== undefined) data.sortOrder = Number(sortOrder);
+  try {
+    const subcategory = await prisma.subcategory.update({ where: { id: req.params.id }, data });
+    res.json(subcategory);
+  } catch (e) {
+    res.status(400).json({ error: 'Не удалось сохранить подкатегорию' });
+  }
+});
+
+router.put('/cities/:id', async (req, res) => {
+  const { label, country, sortOrder, isDefault } = req.body;
+  const data = {};
+  if (label !== undefined) data.label = label;
+  if (country !== undefined) data.country = country;
+  if (sortOrder !== undefined) data.sortOrder = Number(sortOrder);
+  if (isDefault !== undefined) data.isDefault = !!isDefault;
+  try {
+    const city = await prisma.city.update({ where: { id: req.params.id }, data });
+    res.json(city);
+  } catch (e) {
+    res.status(400).json({ error: 'Не удалось сохранить город' });
+  }
+});
+
+/* ================= Массовая загрузка через CSV ================= */
+
+const VALID_ICONS = ['home', 'sparkle', 'gear', 'doc', 'cap', 'cup', 'car', 'box', 'users', 'dumbbell', 'smiley', 'paw', 'building', 'briefcase', 'gift', 'heart'];
+
+// Простая транслитерация кириллицы — только чтобы получить читаемый технический id,
+// на отображение в приложении не влияет (там используется label).
+const CYRILLIC_MAP = {
+  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i',
+  й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't',
+  у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sht', ъ: 'a', ь: '', ю: 'yu', я: 'ya',
+};
+function slugify(text) {
+  const lower = String(text || '').toLowerCase();
+  let out = '';
+  for (const ch of lower) out += CYRILLIC_MAP[ch] !== undefined ? CYRILLIC_MAP[ch] : ch;
+  out = out.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return out || 'item';
+}
+function truthy(v) {
+  return ['да', 'yes', 'true', '1', 'y', 'д'].includes(String(v || '').trim().toLowerCase());
+}
+
+// Принимает сырой текст CSV (не JSON!) — так проще загружать файл с телефона/компьютера
+// без лишней библиотеки для отправки файлов. Если указанные страна/город/категория/
+// подкатегория ещё не существуют — создаёт их на лету.
+router.post('/specialists/bulk-csv', express.text({ type: '*/*', limit: '5mb' }), async (req, res) => {
+  let rows;
+  try {
+    rows = parse(req.body, { columns: true, skip_empty_lines: true, trim: true, bom: true });
+  } catch (e) {
+    return res.status(400).json({ error: 'Не удалось прочитать CSV: ' + e.message });
+  }
+  if (!rows.length) {
+    return res.status(400).json({ error: 'Файл пустой или без строк с данными' });
+  }
+
+  const [existingCities, existingCategories, existingSubcategories] = await Promise.all([
+    prisma.city.findMany(),
+    prisma.category.findMany(),
+    prisma.subcategory.findMany(),
+  ]);
+
+  const cityMap = new Map(existingCities.map((c) => [`${c.label.toLowerCase()}|${c.country.toLowerCase()}`, c]));
+  const categoryMap = new Map(existingCategories.map((c) => [c.label.toLowerCase(), c]));
+  const subcategoryMap = new Map(existingSubcategories.map((s) => [`${s.categoryId}|${s.label.toLowerCase()}`, s]));
+  const usedIds = new Set([
+    ...existingCities.map((c) => c.id),
+    ...existingCategories.map((c) => c.id),
+    ...existingSubcategories.map((s) => s.id),
+  ]);
+
+  function uniqueId(base) {
+    let id = slugify(base);
+    let n = 2;
+    while (usedIds.has(id)) {
+      id = `${slugify(base)}-${n}`;
+      n += 1;
+    }
+    usedIds.add(id);
+    return id;
+  }
+
+  const createdCities = [];
+  const createdCategories = [];
+  const createdSubcategories = [];
+  const createdSpecialistIds = [];
+  const errors = [];
+
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    const lineNo = i + 2; // +1 за заголовок, +1 за индексацию с единицы
+    try {
+      const countryName = (row.country || '').trim();
+      const cityName = (row.city || '').trim();
+      const categoryName = (row.category || '').trim();
+      const subcategoryName = (row.subcategory || '').trim();
+      const name = (row.name || '').trim();
+
+      if (!cityName || !categoryName || !subcategoryName || !name) {
+        errors.push(`Строка ${lineNo}: не хватает city/category/subcategory/name`);
+        continue;
+      }
+
+      const cityKey = `${cityName.toLowerCase()}|${(countryName || 'Bulgaria').toLowerCase()}`;
+      let city = cityMap.get(cityKey);
+      if (!city) {
+        city = await prisma.city.create({
+          data: {
+            id: uniqueId(cityName),
+            label: cityName,
+            country: countryName || 'Bulgaria',
+            sortOrder: existingCities.length + createdCities.length,
+          },
+        });
+        cityMap.set(cityKey, city);
+        createdCities.push(city);
+      }
+
+      const catKey = categoryName.toLowerCase();
+      let category = categoryMap.get(catKey);
+      if (!category) {
+        const iconRaw = (row.category_icon || '').trim().toLowerCase();
+        const icon = VALID_ICONS.includes(iconRaw) ? iconRaw : 'briefcase';
+        category = await prisma.category.create({
+          data: {
+            id: uniqueId(categoryName),
+            label: categoryName,
+            icon,
+            sortOrder: existingCategories.length + createdCategories.length,
+          },
+        });
+        categoryMap.set(catKey, category);
+        createdCategories.push(category);
+      }
+
+      const subKey = `${category.id}|${subcategoryName.toLowerCase()}`;
+      let subcategory = subcategoryMap.get(subKey);
+      if (!subcategory) {
+        subcategory = await prisma.subcategory.create({
+          data: {
+            id: uniqueId(`${category.id}-${subcategoryName}`),
+            categoryId: category.id,
+            label: subcategoryName,
+            sortOrder: 0,
+          },
+        });
+        subcategoryMap.set(subKey, subcategory);
+        createdSubcategories.push(subcategory);
+      }
+
+      const langs = (row.langs || '').split('|').map((s) => s.trim()).filter(Boolean);
+      const services = (row.services || '').split('|').map((s) => s.trim()).filter(Boolean);
+      const statusRaw = (row.status || 'published').trim().toLowerCase();
+      const status = ['pending', 'published', 'rejected'].includes(statusRaw) ? statusRaw : 'published';
+
+      const specialist = await prisma.specialist.create({
+        data: {
+          name,
+          role: (row.role || '').trim() || subcategory.label,
+          about: (row.about || '').trim(),
+          langs,
+          services,
+          contactsTelegram: (row.contactsTelegram || '').trim() || null,
+          contactsInstagram: (row.contactsInstagram || '').trim() || null,
+          contactsPhone: (row.contactsPhone || '').trim() || null,
+          contactsWebsite: (row.contactsWebsite || '').trim() || null,
+          locationAddress: (row.locationAddress || '').trim() || null,
+          cityId: city.id,
+          categoryId: category.id,
+          subcategoryId: subcategory.id,
+          status,
+          verified: truthy(row.verified),
+          pro: truthy(row.pro),
+          boosted: truthy(row.boosted),
+        },
+      });
+      createdSpecialistIds.push(specialist.id);
+    } catch (e) {
+      errors.push(`Строка ${lineNo}: ${e.message}`);
+    }
+  }
+
+  res.json({
+    createdSpecialists: createdSpecialistIds.length,
+    createdCities: createdCities.map((c) => c.label),
+    createdCategories: createdCategories.map((c) => c.label),
+    createdSubcategories: createdSubcategories.map((s) => s.label),
+    errors,
+  });
+});
+
+/* ================= Статистика ================= */
+
+router.get('/stats', async (req, res) => {
+  const now = new Date();
+  const dayAgo = new Date(now - 24 * 60 * 60 * 1000);
+  const weekAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
+
+  const [
+    totalUsers, activeUsers24h, activeUsers7d,
+    totalSpecialists, pendingCount, publishedCount, rejectedCount,
+    totalCategories, totalCities, totalFavorites,
+    proCount, boostedCount, newSpecialists7d,
+    paymentsAgg, categoryCounts, cityCounts,
+  ] = await Promise.all([
+    prisma.telegramUser.count(),
+    prisma.telegramUser.count({ where: { lastSeenAt: { gte: dayAgo } } }),
+    prisma.telegramUser.count({ where: { lastSeenAt: { gte: weekAgo } } }),
+    prisma.specialist.count(),
+    prisma.specialist.count({ where: { status: 'pending' } }),
+    prisma.specialist.count({ where: { status: 'published' } }),
+    prisma.specialist.count({ where: { status: 'rejected' } }),
+    prisma.category.count(),
+    prisma.city.count(),
+    prisma.favorite.count(),
+    prisma.specialist.count({ where: { pro: true } }),
+    prisma.specialist.count({ where: { boosted: true } }),
+    prisma.specialist.count({ where: { createdAt: { gte: weekAgo } } }),
+    prisma.payment.groupBy({ by: ['type'], _sum: { starsAmount: true }, _count: true }),
+    prisma.specialist.groupBy({ by: ['categoryId'], _count: true, orderBy: { _count: 'desc' }, take: 5 }),
+    prisma.specialist.groupBy({ by: ['cityId'], _count: true, orderBy: { _count: 'desc' }, take: 5 }),
+  ]);
+
+  const categories = await prisma.category.findMany({ where: { id: { in: categoryCounts.map((c) => c.categoryId) } } });
+  const cities = await prisma.city.findMany({ where: { id: { in: cityCounts.map((c) => c.cityId).filter(Boolean) } } });
+
+  res.json({
+    users: { total: totalUsers, active24h: activeUsers24h, active7d: activeUsers7d },
+    specialists: {
+      total: totalSpecialists, pending: pendingCount, published: publishedCount, rejected: rejectedCount,
+      pro: proCount, boosted: boostedCount, newLast7d: newSpecialists7d,
+    },
+    catalog: { categories: totalCategories, cities: totalCities },
+    favorites: totalFavorites,
+    payments: paymentsAgg.map((p) => ({ type: p.type, count: p._count, starsTotal: p._sum.starsAmount || 0 })),
+    topCategories: categoryCounts.map((c) => ({
+      label: (categories.find((cat) => cat.id === c.categoryId) || {}).label || c.categoryId,
+      count: c._count,
+    })),
+    topCities: cityCounts.map((c) => ({
+      label: (cities.find((city) => city.id === c.cityId) || {}).label || c.cityId || 'Без города',
+      count: c._count,
+    })),
+  });
+});
+
+router.get('/users', async (req, res) => {
+  const users = await prisma.telegramUser.findMany({ orderBy: { lastSeenAt: 'desc' } });
+  res.json(users);
 });
 
 module.exports = router;
