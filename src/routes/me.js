@@ -97,8 +97,19 @@ router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb
   if (!req.body || !req.body.length) {
     return res.status(400).json({ error: 'Файл не получен' });
   }
+  // Фото прогоняется через Telegram только для того, чтобы получить file_id — но
+  // отправлять его нужно в служебный чат владельца приложения (TELEGRAM_FILE_RELAY_CHAT_ID),
+  // а НЕ обратно в чат пользователя, который его загрузил. Раньше было наоборот: бот
+  // отправлял фото прямо в личный чат с самим загрузившим — а значит, загрузив
+  // неприемлемый контент, пользователь мог пожаловаться в Telegram на «сообщение от
+  // бота» в своём же чате и добиться блокировки всего бота. Теперь до одобрения
+  // фото видит только сам владелец приложения в закрытом служебном чате.
+  const chatId = process.env.TELEGRAM_FILE_RELAY_CHAT_ID;
+  if (!chatId) {
+    return res.status(500).json({ error: 'Загрузка фото временно недоступна — не задана переменная TELEGRAM_FILE_RELAY_CHAT_ID на сервере' });
+  }
   try {
-    const fileId = await uploadPhotoToTelegram(req.body, req.headers['content-type'], req.telegramUser.id);
+    const fileId = await uploadPhotoToTelegram(req.body, req.headers['content-type'], chatId);
     const pendingChanges = { ...(specialist.pendingChanges || {}), photoFileId: fileId };
     const updated = await prisma.specialist.update({
       where: { id },
