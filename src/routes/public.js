@@ -1,6 +1,7 @@
 const express = require('express');
 const prisma = require('../lib/prisma');
 const { createSpecialistLimiter } = require('../middleware/rateLimiters');
+const { streamTelegramFile } = require('../lib/telegramFiles');
 
 const router = express.Router();
 
@@ -86,6 +87,16 @@ router.post('/specialists', createSpecialistLimiter, async (req, res) => {
   });
 
   res.status(201).json(specialist);
+});
+
+// Фото специалиста — проксируем через себя (напрямую отдавать ссылку Telegram нельзя,
+// в ней зашит токен бота). Отдаём только для уже опубликованных анкет.
+router.get('/specialists/:id/photo', async (req, res) => {
+  const specialist = await prisma.specialist.findUnique({ where: { id: Number(req.params.id) } });
+  if (!specialist || !specialist.photoFileId || specialist.status !== 'published') {
+    return res.status(404).json({ error: 'Фото не найдено' });
+  }
+  await streamTelegramFile(specialist.photoFileId, res);
 });
 
 module.exports = router;
