@@ -1,5 +1,6 @@
 const express = require('express');
 const prisma = require('../lib/prisma');
+const { createSpecialistLimiter } = require('../middleware/rateLimiters');
 
 const router = express.Router();
 
@@ -62,8 +63,9 @@ router.get('/specialists/:id', async (req, res) => {
   res.json(specialist);
 });
 
-// Новая заявка от пользователя (мастер добавления из прототипа) — уходит на модерацию
-router.post('/specialists', async (req, res) => {
+// Новая заявка от пользователя (мастер добавления из прототипа) — уходит на модерацию.
+// createSpecialistLimiter не даёт заваливать каталог спамом: не больше 10 заявок в час с одного адреса.
+router.post('/specialists', createSpecialistLimiter, async (req, res) => {
   const {
     name, langs, role, about, services,
     contactsTelegram, contactsInstagram, contactsPhone, contactsWebsite,
