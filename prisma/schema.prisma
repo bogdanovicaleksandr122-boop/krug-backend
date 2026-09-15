@@ -79,7 +79,7 @@ model Favorite {
   telegramUserId String
   specialistId   Int
   createdAt      DateTime   @default(now())
-  specialist     Specialist @relation(fields: [specialistId], references: [id])
+  specialist     Specialist @relation(fields: [specialistId], references: [id], onDelete: Cascade)
 
   @@id([telegramUserId, specialistId])
 }
@@ -104,7 +104,7 @@ model Payment {
   durationDays            Int?
   telegramPaymentChargeId String?
   createdAt               DateTime    @default(now())
-  specialist              Specialist  @relation(fields: [specialistId], references: [id])
+  specialist              Specialist  @relation(fields: [specialistId], references: [id], onDelete: Cascade)
 }
 
 model ModerationLog {
@@ -114,5 +114,18 @@ model ModerationLog {
   action       String
   reason       String?
   createdAt    DateTime   @default(now())
-  specialist   Specialist @relation(fields: [specialistId], references: [id])
+  specialist   Specialist @relation(fields: [specialistId], references: [id], onDelete: Cascade)
+}
+
+// Статистика по пользователям Telegram — обновляется при каждом обращении
+// к защищённым /api/me/* и /api/specialists/:id/purchase-* роутам.
+model TelegramUser {
+  id           String   @id // telegram user id как строка
+  username     String?
+  firstName    String?
+  lastName     String?
+  languageCode String?
+  lastIp       String?
+  firstSeenAt  DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
 }
