@@ -5,8 +5,29 @@ const prisma = require('../lib/prisma');
 const adminAuth = require('../middleware/adminAuth');
 const { adminLoginLimiter } = require('../middleware/rateLimiters');
 const { uploadPhotoToTelegram, streamTelegramFile } = require('../lib/telegramFiles');
+const { toPublicId, fromPublicId } = require('../lib/publicId');
 
 const router = express.Router();
+
+// Подмешивает в анкету данные о том, кто её подал (юзернейм/имя из TelegramUser —
+// эта таблица и так пополняется автоматически при каждом заходе в приложение), плюс
+// публичный номер анкеты. TelegramUser и Specialist не связаны через Prisma-релацию
+// (это просто совпадающие строковые id), поэтому собираем вручную одним доп. запросом
+// на весь список сразу, а не по одному на анкету.
+async function attachSubmitters(specialists) {
+  const ids = [...new Set(specialists.map((s) => s.telegramUserId).filter(Boolean))];
+  const users = ids.length
+    ? await prisma.telegramUser.findMany({ where: { id: { in: ids } } })
+    : [];
+  const byId = new Map(users.map((u) => [u.id, u]));
+  return specialists.map((s) => ({
+    ...s,
+    publicId: toPublicId(s.id),
+    submitter: s.telegramUserId
+      ? (byId.get(s.telegramUserId) || { id: s.telegramUserId, username: null, firstName: null, lastName: null })
+      : null,
+  }));
+}
 
 // Вход в админку. Для простоты старта — один логин/пароль из переменных окружения
 // (не из базы). Когда появится несколько модераторов, легко переключить на таблицу Admin + bcrypt.
@@ -30,7 +51,7 @@ router.get('/pending', async (req, res) => {
     include: { category: true, subcategory: true, city: true },
     orderBy: { createdAt: 'asc' },
   });
-  res.json(pending);
+  res.json(await attachSubmitters(pending));
 });
 
 router.post('/specialists/:id/approve', async (req, res) => {
@@ -68,23 +89,42 @@ router.post('/specialists/:id/reject', async (req, res) => {
 
 /* ================= Полное управление анкетами ================= */
 
-// Список всех анкет (любой статус) — с фильтрами по статусу и текстовому поиску
+// Список всех анкет (любой статус) — с фильтрами по статусу и текстовому поиску.
+// Поиск теперь охватывает не только имя/специализацию, но и номер анкеты
+// (100000000042) и данные того, кто анкету подал — Telegram ID или username.
 router.get('/specialists', async (req, res) => {
   const { status, search } = req.query;
   const where = {};
   if (status) where.status = status;
+
   if (search) {
-    where.OR = [
-      { name: { contains: search, mode: 'insensitive' } },
-      { role: { contains: search, mode: 'insensitive' } },
+    const term = search.trim();
+    const or = [
+      { name: { contains: term, mode: 'insensitive' } },
+      { role: { contains: term, mode: 'insensitive' } },
     ];
+
+    const idFromPublic = fromPublicId(term);
+    if (idFromPublic) or.push({ id: idFromPublic });
+
+    const usernameQuery = term.replace(/^@/, '');
+    const matchingUsers = await prisma.telegramUser.findMany({
+      where: { OR: [{ id: term }, { username: { contains: usernameQuery, mode: 'insensitive' } }] },
+      select: { id: true },
+    });
+    if (matchingUsers.length) {
+      or.push({ telegramUserId: { in: matchingUsers.map((u) => u.id) } });
+    }
+
+    where.OR = or;
   }
+
   const specialists = await prisma.specialist.findMany({
     where,
     include: { category: true, subcategory: true, city: true },
     orderBy: { createdAt: 'desc' },
   });
-  res.json(specialists);
+  res.json(await attachSubmitters(specialists));
 });
 
 router.get('/specialists/:id', async (req, res) => {
@@ -93,7 +133,8 @@ router.get('/specialists/:id', async (req, res) => {
     include: { category: true, subcategory: true, city: true },
   });
   if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
-  res.json(specialist);
+  const [withSubmitter] = await attachSubmitters([specialist]);
+  res.json(withSubmitter);
 });
 
 const EDITABLE_FIELDS = [
@@ -155,18 +196,24 @@ router.delete('/specialists/:id', async (req, res) => {
 
 // Загрузка фото админом — применяется сразу, без очереди модерации (в отличие от
 // фото, которое загружает сам владелец через /api/me/...). Получателем в Telegram,
-// через которого фото прогоняется, чтобы получить file_id, выступает владелец анкеты,
-// если он уже известен, иначе — служебный чат из TELEGRAM_FILE_RELAY_CHAT_ID.
+// через которого фото прогоняется, чтобы получить file_id, ВСЕГДА выступает
+// служебный чат TELEGRAM_FILE_RELAY_CHAT_ID (личный чат владельца приложения с ботом),
+// а не чат владельца анкеты. Раньше, если анкета уже была привязана к владельцу,
+// фото отправлялось прямо в его личный чат с ботом — это открывало уязвимость:
+// пользователь мог загрузить недопустимый контент и затем пожаловаться в Telegram
+// на сообщение «от бота» в СВОЁМ ЖЕ чате, что грозило блокировкой всего бота.
+// Теперь бот никогда не отправляет загруженное фото обратно в чат того, кто его
+// прислал, — только в закрытый служебный чат, который контролирует сам владелец приложения.
 router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb' }), async (req, res) => {
   const id = Number(req.params.id);
   const specialist = await prisma.specialist.findUnique({ where: { id } });
   if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
   if (!req.body || !req.body.length) return res.status(400).json({ error: 'Файл не получен' });
 
-  const chatId = specialist.telegramUserId || process.env.TELEGRAM_FILE_RELAY_CHAT_ID;
+  const chatId = process.env.TELEGRAM_FILE_RELAY_CHAT_ID;
   if (!chatId) {
     return res.status(400).json({
-      error: 'Нет получателя для загрузки фото в Telegram — задайте переменную TELEGRAM_FILE_RELAY_CHAT_ID в Railway (ваш личный Telegram id) или сначала свяжите анкету с владельцем',
+      error: 'Нет служебного получателя для загрузки фото — задайте переменную TELEGRAM_FILE_RELAY_CHAT_ID в Railway (ваш личный Telegram id)',
     });
   }
   try {
