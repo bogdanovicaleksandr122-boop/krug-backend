@@ -72,6 +72,20 @@ router.post('/telegram/webhook', async (req, res) => {
     return res.sendStatus(401);
   }
 
+  // Telegram перед списанием звёзд присылает pre_checkout_query и ждёт ответа в течение
+  // 10 секунд — без явного подтверждения он сам отменяет платёж, и пользователь видит
+  // просто зависшую загрузку без ошибки. Отвечаем сразу, без лишних проверок/запросов к
+  // базе, чтобы точно уложиться в лимит.
+  const preCheckoutQuery = req.body?.pre_checkout_query;
+  if (preCheckoutQuery) {
+    try {
+      await callTelegram('answerPreCheckoutQuery', { pre_checkout_query_id: preCheckoutQuery.id, ok: true });
+    } catch (e) {
+      console.error('Не удалось подтвердить pre_checkout_query', e);
+    }
+    return res.sendStatus(200);
+  }
+
   const message = req.body?.message;
   const payment = message?.successful_payment;
 
