@@ -96,6 +96,28 @@ router.post('/telegram/webhook', async (req, res) => {
         data: { specialistId: id, type: 'boost', starsAmount: payment.total_amount, durationDays: Number(days), telegramPaymentChargeId: payment.telegram_payment_charge_id },
       });
     }
+  } else if (message && message.reply_to_message && message.text) {
+    // Ответ владельца приложения реплаем на пересланное обращение в поддержку
+    // (см. /api/me/support) — находим, кому изначально принадлежало это
+    // сообщение, и пересылаем текст ответа обратно этому пользователю в бот.
+    try {
+      const ticket = await prisma.supportMessage.findUnique({
+        where: {
+          relayChatId_relayMessageId: {
+            relayChatId: String(message.chat.id),
+            relayMessageId: message.reply_to_message.message_id,
+          },
+        },
+      });
+      if (ticket) {
+        await callTelegram('sendMessage', {
+          chat_id: ticket.telegramUserId,
+          text: `💬 Ответ поддержки КРУГ:\n\n${message.text}`,
+        });
+      }
+    } catch (e) {
+      console.error('Не удалось переслать ответ поддержки пользователю', e);
+    }
   }
 
   res.sendStatus(200);
