@@ -108,6 +108,10 @@ router.get('/specialists/:id/photo', async (req, res) => {
   if (!specialist || !specialist.photoFileId || specialist.status !== 'published') {
     return res.status(404).json({ error: 'Фото не найдено' });
   }
+  // Фронт грузит эти фото с другого домена (github.io) через <img> — по умолчанию
+  // helmet ставит Cross-Origin-Resource-Policy: same-origin на все ответы, и без
+  // этой точечной поправки браузер молча блокирует именно междоменную загрузку фото.
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
   await streamTelegramFile(specialist.photoFileId, res);
 });
 
