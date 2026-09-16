@@ -1,6 +1,14 @@
 const crypto = require('crypto');
 const prisma = require('../lib/prisma');
 
+// Сколько времени доверяем initData после её выдачи Telegram. Сама подпись (hash)
+// никогда не истекает сама по себе — без этой проверки один раз перехваченная
+// (например, случайно попавшая в лог, реферер или скриншот) строка initData
+// оставалась бы валидной вечно и позволяла бы выдавать себя за пользователя
+// сколь угодно долго. Telegram обновляет initData при каждом открытии мини-приложения,
+// поэтому окно в 24 часа — стандартная практика, а не искусственное ограничение.
+const MAX_INIT_DATA_AGE_SECONDS = 24 * 60 * 60;
+
 // Проверяет, что initData действительно прислана Telegram и не подделана.
 // Алгоритм — стандартный, описан в документации Telegram WebApp.
 function verifyInitData(initData, botToken) {
@@ -17,7 +25,17 @@ function verifyInitData(initData, botToken) {
   const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
   const computedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
 
-  return computedHash === hash;
+  // timingSafeEqual вместо === — сравнение строкой уязвимо к атаке по времени
+  // отклика (чем раньше не совпал символ, тем быстрее ответ). Для HMAC такую атаку
+  // трудно провести практически, но это ничего не стоящая, стандартная защита.
+  const a = Buffer.from(computedHash, 'hex');
+  const b = Buffer.from(hash, 'hex');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+
+  const authDate = Number(params.get('auth_date'));
+  if (!authDate || Date.now() / 1000 - authDate > MAX_INIT_DATA_AGE_SECONDS) return false;
+
+  return true;
 }
 
 // Middleware для роутов, которые должны знать, кто именно пишет из Telegram.
