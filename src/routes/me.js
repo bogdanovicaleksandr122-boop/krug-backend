@@ -121,6 +121,21 @@ router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb
   }
 });
 
+// Пользователь прочитал уведомление об отклонённой правке — прячем его из кабинета.
+// Саму анкету не трогаем (она уже опубликована как была).
+router.post('/specialists/:id/dismiss-edit-rejection', async (req, res) => {
+  const id = Number(req.params.id);
+  const specialist = await prisma.specialist.findUnique({ where: { id } });
+  if (!ensureOwnership(specialist, req.telegramUser)) {
+    return res.status(403).json({ error: 'Доступно только подтверждённому владельцу анкеты' });
+  }
+  const updated = await prisma.specialist.update({
+    where: { id },
+    data: { editRejectionReason: null, editRejectedAt: null },
+  });
+  res.json({ ok: true, specialist: updated });
+});
+
 // Избранное
 router.post('/specialists/:id/favorite', async (req, res) => {
   await prisma.favorite.upsert({
@@ -178,6 +193,8 @@ router.post('/support', supportLimiter, async (req, res) => {
     `От: ${from} (${[u.first_name, u.last_name].filter(Boolean).join(' ') || 'без имени'})`,
     '',
     String(message).trim(),
+    '',
+    'Чтобы ответить — ответьте на это сообщение реплаем, ответ придёт пользователю в бот.',
   ].join('\n');
 
   try {
@@ -188,6 +205,17 @@ router.post('/support', supportLimiter, async (req, res) => {
     });
     const data = await response.json();
     if (!data.ok) throw new Error(data.description || 'Telegram отклонил сообщение');
+
+    // Запоминаем, какое сообщение в служебном чате отвечает какому пользователю —
+    // без этого при реплае админа бэкенд не знает, кому пересылать ответ.
+    await prisma.supportMessage.create({
+      data: {
+        relayChatId: String(chatId),
+        relayMessageId: data.result.message_id,
+        telegramUserId: String(u.id),
+      },
+    });
+
     res.status(201).json({ ok: true });
   } catch (e) {
     res.status(502).json({ error: 'Не удалось отправить обращение: ' + e.message });
