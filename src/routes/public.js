@@ -4,6 +4,7 @@ const { createSpecialistLimiter } = require('../middleware/rateLimiters');
 const { streamTelegramFile } = require('../lib/telegramFiles');
 const { telegramAuth } = require('../middleware/telegramAuth');
 const { toPublicId } = require('../lib/publicId');
+const { getPrices } = require('../lib/prices');
 
 const router = express.Router();
 
@@ -25,6 +26,12 @@ router.get('/categories', async (req, res) => {
 router.get('/cities', async (req, res) => {
   const cities = await prisma.city.findMany({ orderBy: { sortOrder: 'asc' } });
   res.json(cities);
+});
+
+// Текущие цены PRO/буста — публичный роут, чтобы приложение показывало актуальные
+// цифры на кнопках оплаты (сами цены редактируются в админке, см. lib/prices.js).
+router.get('/prices', async (req, res) => {
+  res.json(await getPrices());
 });
 
 // Публичный список специалистов — только опубликованные, с фильтрами
