@@ -76,10 +76,17 @@ router.post('/specialists/:id/reject', async (req, res) => {
   const specialist = await prisma.specialist.findUnique({ where: { id } });
   if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
 
-  // Отклонение правки уже опубликованной анкеты — просто отбрасываем предложенные
-  // изменения и возвращаем анкету как было, без статуса "отклонено".
+  // Отклонение правки уже опубликованной анкеты — отбрасываем предложенные
+  // изменения и возвращаем анкету как было, без статуса "отклонено", но
+  // сохраняем причину отдельно (editRejectionReason), чтобы владелец анкеты
+  // увидел её в кабинете — раньше причина никуда не сохранялась и терялась.
   const data = specialist.pendingChanges
-    ? { pendingChanges: null, status: 'published' }
+    ? {
+        pendingChanges: null,
+        status: 'published',
+        editRejectionReason: reason || 'Без указания причины',
+        editRejectedAt: new Date(),
+      }
     : { status: 'rejected', rejectionReason: reason || 'Без указания причины' };
 
   const updated = await prisma.specialist.update({ where: { id }, data });
@@ -503,8 +510,12 @@ router.get('/stats', async (req, res) => {
     prisma.specialist.count({ where: { boosted: true } }),
     prisma.specialist.count({ where: { createdAt: { gte: weekAgo } } }),
     prisma.payment.groupBy({ by: ['type'], _sum: { starsAmount: true }, _count: true }),
-    prisma.specialist.groupBy({ by: ['categoryId'], _count: true, orderBy: { _count: 'desc' }, take: 5 }),
-    prisma.specialist.groupBy({ by: ['cityId'], _count: true, orderBy: { _count: 'desc' }, take: 5 }),
+    // Раньше здесь стояло orderBy: { _count: 'desc' } — Prisma требует для сортировки
+    // по агрегату указывать конкретное поле внутри _count (см. документацию по groupBy),
+    // без этого запрос падал с ошибкой валидации ещё до похода в базу — и так как это
+    // было в одном Promise.all со всей остальной статистикой, падал весь /stats разом.
+    prisma.specialist.groupBy({ by: ['categoryId'], _count: { categoryId: true }, orderBy: { _count: { categoryId: 'desc' } }, take: 5 }),
+    prisma.specialist.groupBy({ by: ['cityId'], _count: { cityId: true }, orderBy: { _count: { cityId: 'desc' } }, take: 5 }),
   ]);
 
   const categories = await prisma.category.findMany({ where: { id: { in: categoryCounts.map((c) => c.categoryId) } } });
@@ -521,11 +532,11 @@ router.get('/stats', async (req, res) => {
     payments: paymentsAgg.map((p) => ({ type: p.type, count: p._count, starsTotal: p._sum.starsAmount || 0 })),
     topCategories: categoryCounts.map((c) => ({
       label: (categories.find((cat) => cat.id === c.categoryId) || {}).label || c.categoryId,
-      count: c._count,
+      count: c._count.categoryId,
     })),
     topCities: cityCounts.map((c) => ({
       label: (cities.find((city) => city.id === c.cityId) || {}).label || c.cityId || 'Без города',
-      count: c._count,
+      count: c._count.cityId,
     })),
   });
 });
