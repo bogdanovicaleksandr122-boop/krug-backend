@@ -2,12 +2,9 @@ const express = require('express');
 const prisma = require('../lib/prisma');
 const { telegramAuth } = require('../middleware/telegramAuth');
 const { paymentLimiter } = require('../middleware/rateLimiters');
+const { getPrices } = require('../lib/prices');
 
 const router = express.Router();
-
-// Цены — те же, что были в прототипе
-const PRO_PRICE = 500; // Stars в месяц
-const BOOST_PRICES = { 7: 200, 30: 600 }; // Stars за срок в днях
 
 async function callTelegram(method, payload) {
   // В Node 18+ (у вас на Railway — Node 24) функция fetch встроена в сам Node.js,
@@ -28,12 +25,13 @@ router.post('/specialists/:id/purchase-pro', paymentLimiter, telegramAuth, async
     return res.status(403).json({ error: 'Купить PRO может только подтверждённый владелец анкеты' });
   }
 
+  const prices = await getPrices();
   const invoice = await callTelegram('createInvoiceLink', {
     title: 'PRO-подписка КРУГ',
     description: `PRO-статус для анкеты «${specialist.name}» на 1 месяц`,
     payload: `pro:${specialist.id}`,
     currency: 'XTR',
-    prices: [{ label: 'PRO, 1 месяц', amount: PRO_PRICE }],
+    prices: [{ label: 'PRO, 1 месяц', amount: prices.pro_price }],
   });
 
   res.json(invoice);
@@ -42,7 +40,9 @@ router.post('/specialists/:id/purchase-pro', paymentLimiter, telegramAuth, async
 // Покупка Буста
 router.post('/specialists/:id/purchase-boost', paymentLimiter, telegramAuth, async (req, res) => {
   const { days } = req.body; // 7 или 30
-  const price = BOOST_PRICES[days];
+  const prices = await getPrices();
+  const priceByDays = { 7: prices.boost_price_7, 30: prices.boost_price_30 };
+  const price = priceByDays[days];
   if (!price) return res.status(400).json({ error: 'Некорректный срок буста' });
 
   const specialist = await prisma.specialist.findUnique({ where: { id: Number(req.params.id) } });
