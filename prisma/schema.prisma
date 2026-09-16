@@ -58,6 +58,8 @@ model Specialist {
   subcategoryId     String
   status            SpecialistStatus @default(pending)
   rejectionReason   String?
+  editRejectionReason String?
+  editRejectedAt      DateTime?
   verified          Boolean          @default(false)
   pro               Boolean          @default(false)
   proExpiresAt      DateTime?
@@ -116,6 +118,19 @@ model ModerationLog {
   reason       String?
   createdAt    DateTime   @default(now())
   specialist   Specialist @relation(fields: [specialistId], references: [id], onDelete: Cascade)
+}
+
+// Связывает сообщение с обращением в поддержку, пересланное в служебный чат,
+// с пользователем, который его написал — чтобы владелец приложения мог ответить
+// пользователю простым реплаем в Telegram, и бэкенд знал, кому переслать ответ.
+model SupportMessage {
+  id             Int      @id @default(autoincrement())
+  relayChatId    String
+  relayMessageId Int
+  telegramUserId String
+  createdAt      DateTime @default(now())
+
+  @@unique([relayChatId, relayMessageId])
 }
 
 // Статистика по пользователям Telegram — обновляется при каждом обращении
