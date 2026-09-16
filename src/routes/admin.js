@@ -231,6 +231,7 @@ router.get('/specialists/:id/pending-photo', async (req, res) => {
   const specialist = await prisma.specialist.findUnique({ where: { id: Number(req.params.id) } });
   const fileId = specialist && specialist.pendingChanges && specialist.pendingChanges.photoFileId;
   if (!fileId) return res.status(404).json({ error: 'Нет фото на проверке' });
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
   await streamTelegramFile(fileId, res);
 });
 
