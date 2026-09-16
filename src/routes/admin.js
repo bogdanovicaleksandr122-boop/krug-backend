@@ -6,6 +6,7 @@ const adminAuth = require('../middleware/adminAuth');
 const { adminLoginLimiter } = require('../middleware/rateLimiters');
 const { uploadPhotoToTelegram, streamTelegramFile } = require('../lib/telegramFiles');
 const { toPublicId, fromPublicId } = require('../lib/publicId');
+const { getPrices, setPrices } = require('../lib/prices');
 
 const router = express.Router();
 
@@ -148,7 +149,7 @@ const EDITABLE_FIELDS = [
   'name', 'role', 'about', 'langs', 'services',
   'contactsTelegram', 'contactsInstagram', 'contactsPhone', 'contactsWebsite',
   'locationAddress', 'cityId', 'categoryId', 'subcategoryId', 'status', 'rejectionReason',
-  'verified', 'pro', 'proExpiresAt', 'boosted', 'boostedUntil',
+  'verified', 'pro', 'proExpiresAt', 'boosted', 'boostedUntil', 'telegramUserId',
 ];
 
 function pickEditableFields(body) {
@@ -161,6 +162,23 @@ function pickEditableFields(body) {
   return data;
 }
 
+// Проверяет и нормализует Telegram ID нового владельца анкеты при ручном назначении
+// через админку. Пустое значение — снять владельца (анкета станет ничьей).
+// Непустое — id обязательно должен принадлежать реальному пользователю, который
+// хоть раз открывал приложение (иначе легко опечататься и отдать анкету не тому).
+async function resolveOwnerId(telegramUserId) {
+  if (telegramUserId === undefined) return undefined;
+  const trimmed = telegramUserId == null ? '' : String(telegramUserId).trim();
+  if (!trimmed) return null;
+  const user = await prisma.telegramUser.findUnique({ where: { id: trimmed } });
+  if (!user) {
+    const err = new Error(`Пользователь с Telegram ID «${trimmed}» не найден — он должен хотя бы раз открыть приложение КРУГ`);
+    err.isOwnerValidation = true;
+    throw err;
+  }
+  return trimmed;
+}
+
 // Ручное создание анкеты админом — в отличие от публичной формы, здесь можно сразу
 // указать статус published и вручную выставить verified/pro/boosted без оплаты.
 router.post('/specialists', async (req, res) => {
@@ -169,10 +187,12 @@ router.post('/specialists', async (req, res) => {
     return res.status(400).json({ error: 'Не хватает обязательных полей (имя, специализация, категория, подкатегория)' });
   }
   try {
+    data.telegramUserId = await resolveOwnerId(data.telegramUserId);
+    if (data.telegramUserId) data.verified = true; // назначили владельца вручную — считаем подтверждённым
     const specialist = await prisma.specialist.create({ data: { status: 'published', ...data } });
     res.status(201).json(specialist);
   } catch (e) {
-    res.status(400).json({ error: 'Не удалось создать анкету: ' + e.message });
+    res.status(400).json({ error: e.isOwnerValidation ? e.message : 'Не удалось создать анкету: ' + e.message });
   }
 });
 
@@ -183,11 +203,13 @@ router.put('/specialists/:id', async (req, res) => {
   const data = pickEditableFields(req.body);
   data.pendingChanges = null; // ручное редактирование админом отменяет любые несогласованные правки владельца
   try {
+    data.telegramUserId = await resolveOwnerId(data.telegramUserId);
+    if (data.telegramUserId) data.verified = true; // назначили владельца вручную — считаем подтверждённым
     const specialist = await prisma.specialist.update({ where: { id }, data });
     await prisma.moderationLog.create({ data: { specialistId: id, action: 'admin-edit' } });
     res.json(specialist);
   } catch (e) {
-    res.status(400).json({ error: 'Не удалось сохранить: ' + e.message });
+    res.status(400).json({ error: e.isOwnerValidation ? e.message : 'Не удалось сохранить: ' + e.message });
   }
 });
 
@@ -544,6 +566,23 @@ router.get('/stats', async (req, res) => {
 router.get('/users', async (req, res) => {
   const users = await prisma.telegramUser.findMany({ orderBy: { lastSeenAt: 'desc' } });
   res.json(users);
+});
+
+// Цены PRO/буста — редактируются вручную из админки (вкладка "Цены"),
+// хранятся в таблице AppSetting, см. lib/prices.js.
+router.get('/prices', async (req, res) => {
+  res.json(await getPrices());
+});
+
+router.put('/prices', async (req, res) => {
+  const { pro_price, boost_price_7, boost_price_30 } = req.body;
+  const values = { pro_price, boost_price_7, boost_price_30 };
+  const isValid = Object.values(values).every((v) => v !== undefined && Number(v) > 0);
+  if (!isValid) {
+    return res.status(400).json({ error: 'Все три цены обязательны и должны быть больше нуля' });
+  }
+  await setPrices(values);
+  res.json(await getPrices());
 });
 
 module.exports = router;
