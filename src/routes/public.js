@@ -13,18 +13,23 @@ function withPublicId(specialist) {
   return { ...specialist, publicId: toPublicId(specialist.id) };
 }
 
-// Список всех категорий с подкатегориями — для верхней ленты категорий
+// Список всех категорий с подкатегориями — для верхней ленты категорий.
+// Меняется только когда админ вручную правит структуру каталога (очень редко),
+// поэтому можно спокойно кэшировать на 10 минут — заметно меньше трафика на
+// каждое открытие приложения без риска долго показывать устаревший список.
 router.get('/categories', async (req, res) => {
   const categories = await prisma.category.findMany({
     orderBy: { sortOrder: 'asc' },
     include: { subcategories: { orderBy: { sortOrder: 'asc' } } },
   });
+  res.set('Cache-Control', 'public, max-age=600');
   res.json(categories);
 });
 
-// Список городов
+// Список городов — та же логика, что и у категорий.
 router.get('/cities', async (req, res) => {
   const cities = await prisma.city.findMany({ orderBy: { sortOrder: 'asc' } });
+  res.set('Cache-Control', 'public, max-age=600');
   res.json(cities);
 });
 
