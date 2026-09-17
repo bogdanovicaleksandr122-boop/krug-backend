@@ -22,7 +22,18 @@ async function uploadPhotoToTelegram(buffer, mimeType, chatId) {
     throw new Error(data.description || 'Telegram отклонил фото');
   }
   const sizes = data.result.photo;
-  return sizes[sizes.length - 1].file_id; // последний элемент — самый большой размер
+  return pickDisplaySize(sizes);
+}
+
+// Telegram сам создаёт несколько размеров одной и той же фотографии (обычно от ~90px
+// до ~1280px). Анкета показывается только в маленьком круглом аватаре, поэтому нет
+// смысла хранить и гонять самый крупный вариант — берём тот, что уже достаточно
+// чёткий даже на экранах с высокой плотностью пикселей, но весит в разы меньше.
+function pickDisplaySize(sizes) {
+  const TARGET_WIDTH = 400;
+  const byWidth = [...sizes].sort((a, b) => a.width - b.width);
+  const goodEnough = byWidth.find((s) => s.width >= TARGET_WIDTH);
+  return (goodEnough || byWidth[byWidth.length - 1]).file_id;
 }
 
 async function streamTelegramFile(fileId, res) {
@@ -39,7 +50,11 @@ async function streamTelegramFile(fileId, res) {
     return;
   }
   res.set('Content-Type', fileRes.headers.get('content-type') || 'image/jpeg');
-  res.set('Cache-Control', 'public, max-age=3600');
+  // Раньше было max-age=3600 (час) — теперь ссылка на фото содержит версию
+  // (время последнего изменения анкеты, см. index.html), поэтому старое фото
+  // никогда не покажется под новым URL, и кэш можно спокойно держать долго —
+  // это и есть экономия трафика между визитами пользователя.
+  res.set('Cache-Control', 'public, max-age=2592000, immutable'); // 30 дней
   const buffer = Buffer.from(await fileRes.arrayBuffer());
   res.send(buffer);
 }
