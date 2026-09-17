@@ -76,6 +76,12 @@ model Specialist {
   favorites      Favorite[]
   payments       Payment[]
   moderationLogs ModerationLog[]
+
+  // Без этих индексов с ростом каталога до тысяч анкет главный запрос приложения —
+  // "покажи опубликованные анкеты этой подкатегории в этом городе" — начал бы
+  // линейно замедляться (полный перебор таблицы на каждый запрос).
+  @@index([status, subcategoryId, cityId])
+  @@index([telegramUserId])
 }
 
 model Favorite {
