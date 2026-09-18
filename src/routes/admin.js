@@ -7,6 +7,7 @@ const { adminLoginLimiter } = require('../middleware/rateLimiters');
 const { uploadPhotoToTelegram, streamTelegramFile } = require('../lib/telegramFiles');
 const { toPublicId, fromPublicId } = require('../lib/publicId');
 const { getPrices, setPrices } = require('../lib/prices');
+const { sendTelegramMessage } = require('../lib/telegramSend');
 
 const router = express.Router();
 
@@ -68,6 +69,10 @@ router.post('/specialists/:id/approve', async (req, res) => {
 
   const updated = await prisma.specialist.update({ where: { id }, data });
   await prisma.moderationLog.create({ data: { specialistId: id, action: 'approve' } });
+  if (updated.telegramUserId) {
+    sendTelegramMessage(updated.telegramUserId, `✅ Ваша анкета «${updated.name}» опубликована в КРУГ!`)
+      .catch((e) => console.error('Не удалось отправить уведомление об одобрении', e));
+  }
   res.json(updated);
 });
 
@@ -92,6 +97,13 @@ router.post('/specialists/:id/reject', async (req, res) => {
 
   const updated = await prisma.specialist.update({ where: { id }, data });
   await prisma.moderationLog.create({ data: { specialistId: id, action: 'reject', reason } });
+  if (updated.telegramUserId) {
+    const text = specialist.pendingChanges
+      ? `⚠️ Ваши последние изменения в анкете «${updated.name}» отклонены модератором.\nПричина: ${updated.editRejectionReason}`
+      : `❌ Ваша анкета «${updated.name}» отклонена.\nПричина: ${updated.rejectionReason}`;
+    sendTelegramMessage(updated.telegramUserId, text)
+      .catch((e) => console.error('Не удалось отправить уведомление об отказе', e));
+  }
   res.json(updated);
 });
 
@@ -583,6 +595,35 @@ router.put('/prices', async (req, res) => {
   }
   await setPrices(values);
   res.json(await getPrices());
+});
+
+// Рассылка сообщения всем пользователям бота (для объявлений типа "добавили новый город").
+// Отправляем с небольшой паузой между сообщениями — Telegram ограничивает общий поток
+// сообщений от бота примерно 30 в секунду, без паузы часть отправок отклонится с ошибкой.
+// При росте базы до многих тысяч пользователей рассылку стоит перевести в фоновую
+// задачу — здесь она ждёт завершения в рамках одного запроса, что при сотнях
+// пользователей занимает секунды, а при десятках тысяч может быть слишком долго.
+router.post('/broadcast', async (req, res) => {
+  const { text } = req.body;
+  if (!text || !String(text).trim()) {
+    return res.status(400).json({ error: 'Введите текст рассылки' });
+  }
+  const message = String(text).trim();
+  const users = await prisma.telegramUser.findMany({ select: { id: true } });
+
+  let sent = 0;
+  let failed = 0;
+  for (const u of users) {
+    try {
+      const result = await sendTelegramMessage(u.id, message);
+      if (result.ok) sent += 1; else failed += 1;
+    } catch (e) {
+      failed += 1;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+
+  res.json({ total: users.length, sent, failed });
 });
 
 module.exports = router;
