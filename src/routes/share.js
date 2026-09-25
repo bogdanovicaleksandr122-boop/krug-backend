@@ -2,12 +2,10 @@ const express = require('express');
 const prisma = require('../lib/prisma');
 const { telegramAuth } = require('../middleware/telegramAuth');
 const { shareLimiter } = require('../middleware/rateLimiters');
-const { getShareCard, CARD_WIDTH, CARD_HEIGHT } = require('../lib/shareCard');
+const { getShareCard } = require('../lib/shareCard');
+const { publicBaseUrl, buildPhotoResult } = require('../lib/shareMessage');
 
 const router = express.Router();
-
-const BOT_USERNAME = process.env.BOT_USERNAME || 'krugspace_bot';
-const MINI_APP_NAME = process.env.MINI_APP_NAME || 'app';
 
 async function findPublished(rawId) {
   const id = Number(rawId);
@@ -17,14 +15,6 @@ async function findPublished(rawId) {
     include: { category: true, subcategory: true, city: true },
   });
   return specialist && specialist.status === 'published' ? specialist : null;
-}
-
-// Публичный адрес этого сервера — Telegram сам скачивает по нему картинку.
-// Railway сам сообщает свой домен в RAILWAY_PUBLIC_DOMAIN.
-function publicBaseUrl(req) {
-  if (process.env.PUBLIC_API_URL) return process.env.PUBLIC_API_URL.replace(/\/+$/, '');
-  if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
-  return `${req.protocol}://${req.get('host')}`;
 }
 
 // Картинка-карточка анкеты. Её забирает Telegram, когда показывает сообщение.
@@ -53,30 +43,12 @@ router.post('/specialists/:id/share-prepare', shareLimiter, telegramAuth, async 
     // приложение поделится по-старому, ссылкой), и Telegram получит её мгновенно.
     await getShareCard(specialist);
 
-    const version = new Date(specialist.updatedAt).getTime();
-    const photoUrl = `${publicBaseUrl(req)}/api/specialists/${specialist.id}/share-card.jpg?v=${version}`;
-    const deepLink = `https://t.me/${BOT_USERNAME}/${MINI_APP_NAME}?startapp=spec_${specialist.id}`;
-    const cityText = specialist.city ? specialist.city.label : '';
-    const caption = [`${specialist.name} — ${specialist.role}`, cityText ? `📍 ${cityText}` : '']
-      .filter(Boolean)
-      .join('\n')
-      .slice(0, 1000);
-
     const tgRes = await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/savePreparedInlineMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         user_id: req.telegramUser.id,
-        result: {
-          type: 'photo',
-          id: `spec_${specialist.id}_${Date.now()}`,
-          photo_url: photoUrl,
-          thumbnail_url: photoUrl,
-          photo_width: CARD_WIDTH,
-          photo_height: CARD_HEIGHT,
-          caption,
-          reply_markup: { inline_keyboard: [[{ text: 'Открыть анкету', url: deepLink }]] },
-        },
+        result: buildPhotoResult(specialist, publicBaseUrl(req), `spec_${specialist.id}_${Date.now()}`),
         allow_user_chats: true,
         allow_bot_chats: true,
         allow_group_chats: true,
