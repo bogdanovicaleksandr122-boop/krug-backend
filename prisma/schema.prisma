@@ -76,6 +76,7 @@ model Specialist {
   favorites      Favorite[]
   payments       Payment[]
   moderationLogs ModerationLog[]
+  events         SpecialistEvent[]
 
   // Без этих индексов с ростом каталога до тысяч анкет главный запрос приложения —
   // "покажи опубликованные анкеты этой подкатегории в этом городе" — начал бы
@@ -157,4 +158,92 @@ model TelegramUser {
   lastIp       String?
   firstSeenAt  DateTime @default(now())
   lastSeenAt   DateTime @default(now())
+
+  // Откуда пользователь пришёл в самый первый раз (заполняется один раз и больше
+  // не меняется): "ref" — по рекламной ссылке, "share" — по ссылке на анкету,
+  // которой с ним кто-то поделился, "direct" — сам открыл бота/приложение.
+  // У пользователей, пришедших до появления этой статистики, остаётся пустым.
+  firstSource    String?
+  referralLinkId Int?
+  referralLink   ReferralLink? @relation(fields: [referralLinkId], references: [id], onDelete: SetNull)
+
+  @@index([referralLinkId])
+  @@index([firstSeenAt])
+}
+
+// Рекламная (реферальная) ссылка: t.me/<бот>/<app>?startapp=r_<code>.
+// Создаётся в админке под конкретный канал/чат, где покупается реклама —
+// по ней видно, сколько людей пришло именно оттуда и что они делали дальше.
+model ReferralLink {
+  id                 Int            @id @default(autoincrement())
+  code               String         @unique
+  name               String
+  channel            String?        // где размещена реклама: @канал, название чата
+  cost               Float?         // сколько заплатили за рекламу (для расчёта цены одного пользователя)
+  currency           String?        // валюта стоимости: EUR, PLN, BGN, USD, Stars...
+  note               String?
+  targetSpecialistId Int?           // если задано — по ссылке сразу открывается эта анкета
+  archived           Boolean        @default(false)
+  createdAt          DateTime       @default(now())
+
+  users TelegramUser[]
+  opens AppOpen[]
+}
+
+// Каждое открытие мини-приложения пользователем Telegram. По этим записям
+// считаются заходы, активность по дням и переходы по рекламным ссылкам
+// (в том числе повторные — когда уже знакомый пользователь снова нажал рекламу).
+model AppOpen {
+  id             Int           @id @default(autoincrement())
+  telegramUserId String
+  source         String        // direct / ref / share
+  referralLinkId Int?
+  specialistId   Int?          // анкета из ссылки spec_<id> (если открыли по "поделиться")
+  isNewUser      Boolean       @default(false)
+  platform       String?       // ios / android / tdesktop / web... — из Telegram
+  // Время запуска из подписанных данных Telegram. Одно открытие = одна пара
+  // (пользователь, authDate): перезагрузка страницы внутри того же запуска
+  // не считается вторым заходом, и накрутить заходы повтором запроса нельзя.
+  authDate       Int?
+  createdAt      DateTime      @default(now())
+  referralLink   ReferralLink? @relation(fields: [referralLinkId], references: [id], onDelete: SetNull)
+
+  @@unique([telegramUserId, authDate])
+
+  @@index([createdAt])
+  @@index([referralLinkId, createdAt])
+  @@index([telegramUserId, createdAt])
+}
+
+// Действия пользователей с анкетами: просмотр карточки, нажатие на контакт,
+// "поделиться", добавление в избранное. Анкету при удалении не держим —
+// её события удаляются вместе с ней.
+model SpecialistEvent {
+  id             Int        @id @default(autoincrement())
+  specialistId   Int
+  telegramUserId String
+  type           String     // view / contact / share / favorite
+  detail         String?    // для contact: telegram / phone / instagram / website / map
+  source         String?    // для view: откуда открыли — catalog / search / favorites / share / ref / inline
+  createdAt      DateTime   @default(now())
+  specialist     Specialist @relation(fields: [specialistId], references: [id], onDelete: Cascade)
+
+  @@index([specialistId, type, createdAt])
+  @@index([type, createdAt])
+  @@index([telegramUserId, createdAt])
+}
+
+// Что люди ищут и какие разделы открывают. Особенно ценны запросы без
+// результатов — это спрос, под который в каталоге ещё нет специалистов.
+model SearchLog {
+  id             Int      @id @default(autoincrement())
+  telegramUserId String
+  kind           String   // text — поиск по слову, subcategory — открыли раздел каталога
+  query          String?
+  subcategoryId  String?
+  cityId         String?
+  resultsCount   Int
+  createdAt      DateTime @default(now())
+
+  @@index([kind, createdAt])
 }

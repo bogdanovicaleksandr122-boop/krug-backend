@@ -58,4 +58,14 @@ const shareLimiter = rateLimit({
   message: { error: 'Слишком много запросов, попробуйте позже' },
 });
 
-module.exports = { generalLimiter, adminLoginLimiter, createSpecialistLimiter, paymentLimiter, supportLimiter, shareLimiter };
+// Лимит на сбор статистики (открытия приложения, просмотры, нажатия на контакты) —
+// обычному пользователю столько не нужно даже при очень активном листании.
+const trackLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 минута
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Слишком много запросов, попробуйте позже' },
+});
+
+module.exports = { trackLimiter, generalLimiter, adminLoginLimiter, createSpecialistLimiter, paymentLimiter, supportLimiter, shareLimiter };
