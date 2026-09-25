@@ -4,6 +4,7 @@ const { telegramAuth } = require('../middleware/telegramAuth');
 const { shareLimiter } = require('../middleware/rateLimiters');
 const { getShareCard } = require('../lib/shareCard');
 const { publicBaseUrl, buildPhotoResult } = require('../lib/shareMessage');
+const { asyncRoute } = require('../lib/asyncRoute');
 
 const router = express.Router();
 
@@ -18,7 +19,7 @@ async function findPublished(rawId) {
 }
 
 // Картинка-карточка анкеты. Её забирает Telegram, когда показывает сообщение.
-router.get('/specialists/:id/share-card.jpg', async (req, res, next) => {
+router.get('/specialists/:id/share-card.jpg', asyncRoute(async (req, res, next) => {
   try {
     const specialist = await findPublished(req.params.id);
     if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
@@ -30,11 +31,11 @@ router.get('/specialists/:id/share-card.jpg', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
+}));
 
 // Готовит сообщение "картинка + кнопка" для отправки через Telegram.shareMessage.
 // Telegram возвращает номер заготовки, приложение по нему открывает выбор чата.
-router.post('/specialists/:id/share-prepare', shareLimiter, telegramAuth, async (req, res, next) => {
+router.post('/specialists/:id/share-prepare', shareLimiter, telegramAuth, asyncRoute(async (req, res, next) => {
   try {
     const specialist = await findPublished(req.params.id);
     if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
@@ -64,6 +65,6 @@ router.post('/specialists/:id/share-prepare', shareLimiter, telegramAuth, async 
   } catch (err) {
     next(err);
   }
-});
+}));
 
 module.exports = router;

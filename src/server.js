@@ -60,10 +60,15 @@ app.use('/api', trackRoutes);
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 // Раз в час снимаем истёкшие PRO/Буст статусы, чтобы они не висели вечно
-setInterval(async () => {
+async function expireStatuses() {
   const now = new Date();
   await prisma.specialist.updateMany({ where: { pro: true, proExpiresAt: { lt: now } }, data: { pro: false } });
   await prisma.specialist.updateMany({ where: { boosted: true, boostedUntil: { lt: now } }, data: { boosted: false } });
+}
+// Если база на секунду недоступна — просто пишем в лог и пробуем через час,
+// а не роняем весь сервер.
+setInterval(() => {
+  expireStatuses().catch((e) => console.error('Не удалось снять истёкшие PRO/Буст статусы', e));
 }, 60 * 60 * 1000);
 
 // Подробные записи статистики (открытия, просмотры, поиски) храним 13 месяцев —

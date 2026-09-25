@@ -14,7 +14,7 @@ function ensureOwnership(specialist, telegramUser) {
 }
 
 // Подтверждение владения анкетой ("это я")
-router.post('/specialists/:id/claim', async (req, res) => {
+router.post('/specialists/:id/claim', asyncRoute(async (req, res) => {
   const specialist = await prisma.specialist.findUnique({ where: { id: Number(req.params.id) } });
   if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
 
@@ -35,15 +35,15 @@ router.post('/specialists/:id/claim', async (req, res) => {
     verified: false,
     message: 'Автоматическое подтверждение не сработало. Разместите код подтверждения в био Instagram или на сайте — модератор проверит вручную.',
   });
-});
+}));
 
 // «Мои анкеты»
-router.get('/specialists', async (req, res) => {
+router.get('/specialists', asyncRoute(async (req, res) => {
   const specialists = await prisma.specialist.findMany({
     where: { telegramUserId: String(req.telegramUser.id) },
   });
   res.json(specialists);
-});
+}));
 
 // Статистика своей анкеты — только для подтверждённого владельца. Показываем
 // лишь количество (просмотры, нажатия на контакты), кто именно смотрел — не видно.
@@ -66,7 +66,7 @@ const OWNER_EDITABLE_FIELDS = [
 // в pendingChanges и уходят на проверку модератору (статус анкеты становится pending,
 // поэтому на время проверки она пропадает из общего каталога). Живые данные не трогаем,
 // чтобы при отклонении правок можно было просто откатиться к тому, что было.
-router.put('/specialists/:id', async (req, res) => {
+router.put('/specialists/:id', asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const specialist = await prisma.specialist.findUnique({ where: { id } });
   if (!ensureOwnership(specialist, req.telegramUser)) {
@@ -85,10 +85,10 @@ router.put('/specialists/:id', async (req, res) => {
     data: { pendingChanges, status: 'pending' },
   });
   res.json({ ok: true, specialist: updated });
-});
+}));
 
 // Владелец удаляет свою анкету — сразу, без подтверждения модератором
-router.delete('/specialists/:id', async (req, res) => {
+router.delete('/specialists/:id', asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const specialist = await prisma.specialist.findUnique({ where: { id } });
   if (!ensureOwnership(specialist, req.telegramUser)) {
@@ -96,12 +96,12 @@ router.delete('/specialists/:id', async (req, res) => {
   }
   await prisma.specialist.delete({ where: { id } });
   res.status(204).end();
-});
+}));
 
 // Владелец загружает фото. Тоже уходит на проверку вместе с остальными правками —
 // сама загрузка в Telegram происходит сразу, но анкета покажет новое фото публично
 // только после одобрения администратором.
-router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb' }), async (req, res) => {
+router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb' }), asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const specialist = await prisma.specialist.findUnique({ where: { id } });
   if (!ensureOwnership(specialist, req.telegramUser)) {
@@ -132,11 +132,11 @@ router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb
   } catch (e) {
     res.status(502).json({ error: 'Не удалось загрузить фото в Telegram: ' + e.message });
   }
-});
+}));
 
 // Пользователь прочитал уведомление об отклонённой правке — прячем его из кабинета.
 // Саму анкету не трогаем (она уже опубликована как была).
-router.post('/specialists/:id/dismiss-edit-rejection', async (req, res) => {
+router.post('/specialists/:id/dismiss-edit-rejection', asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const specialist = await prisma.specialist.findUnique({ where: { id } });
   if (!ensureOwnership(specialist, req.telegramUser)) {
@@ -147,10 +147,10 @@ router.post('/specialists/:id/dismiss-edit-rejection', async (req, res) => {
     data: { editRejectionReason: null, editRejectedAt: null },
   });
   res.json({ ok: true, specialist: updated });
-});
+}));
 
 // Избранное
-router.post('/specialists/:id/favorite', async (req, res) => {
+router.post('/specialists/:id/favorite', asyncRoute(async (req, res) => {
   await prisma.favorite.upsert({
     where: {
       telegramUserId_specialistId: {
@@ -165,9 +165,9 @@ router.post('/specialists/:id/favorite', async (req, res) => {
     },
   });
   res.status(204).end();
-});
+}));
 
-router.delete('/specialists/:id/favorite', async (req, res) => {
+router.delete('/specialists/:id/favorite', asyncRoute(async (req, res) => {
   await prisma.favorite.deleteMany({
     where: {
       telegramUserId: String(req.telegramUser.id),
@@ -175,21 +175,21 @@ router.delete('/specialists/:id/favorite', async (req, res) => {
     },
   });
   res.status(204).end();
-});
+}));
 
-router.get('/favorites', async (req, res) => {
+router.get('/favorites', asyncRoute(async (req, res) => {
   const favorites = await prisma.favorite.findMany({
     where: { telegramUserId: String(req.telegramUser.id) },
     include: { specialist: true },
   });
   res.json(favorites.map((f) => f.specialist));
-});
+}));
 
 // Обращение в поддержку из раздела "Поддержка". Пересылаем сообщение владельцу
 // приложения в Telegram — отдельного интерфейса для тикетов пока нет, а личный
 // чат владельца (тот же SUPPORT_CHAT_ID / TELEGRAM_FILE_RELAY_CHAT_ID, что уже
 // используется для загрузки фото без владельца) для старта вполне достаточен.
-router.post('/support', supportLimiter, async (req, res) => {
+router.post('/support', supportLimiter, asyncRoute(async (req, res) => {
   const { topic, message } = req.body;
   if (!topic || !message || !String(message).trim()) {
     return res.status(400).json({ error: 'Нужны тема и текст обращения' });
@@ -233,6 +233,6 @@ router.post('/support', supportLimiter, async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: 'Не удалось отправить обращение: ' + e.message });
   }
-});
+}));
 
 module.exports = router;
