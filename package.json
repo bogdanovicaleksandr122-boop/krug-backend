@@ -9,6 +9,7 @@
     "seed": "node prisma/seed.js"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^0.1.65",
     "@prisma/client": "^5.19.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
