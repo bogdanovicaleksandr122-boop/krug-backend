@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { parse } = require('csv-parse/sync');
@@ -9,9 +10,20 @@ const { toPublicId, fromPublicId } = require('../lib/publicId');
 const { getPrices, setPrices } = require('../lib/prices');
 const { sendTelegramMessage } = require('../lib/telegramSend');
 const { slugify } = require('../lib/slugify');
+const { adminTelegramIds, telegramLoginEnabled, verifyLoginWidget, notifyAdminsAboutLogin } = require('../lib/adminAccess');
+const { BOT_USERNAME } = require('../lib/shareMessage');
 const { asyncRoute } = require('../lib/asyncRoute');
 
 const router = express.Router();
+
+// Сравнение строк за одинаковое время — чтобы по скорости ответа нельзя было
+// угадывать пароль по буквам. Сначала хэшируем, чтобы длины всегда совпадали.
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ha = crypto.createHash('sha256').update(a).digest();
+  const hb = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
 
 // Подмешивает в анкету данные о том, кто её подал (юзернейм/имя из TelegramUser —
 // эта таблица и так пополняется автоматически при каждом заходе в приложение), плюс
@@ -33,15 +45,52 @@ async function attachSubmitters(specialists) {
   }));
 }
 
-// Вход в админку. Для простоты старта — один логин/пароль из переменных окружения
-// (не из базы). Когда появится несколько модераторов, легко переключить на таблицу Admin + bcrypt.
-// adminLoginLimiter не даёт перебирать пароль: не больше 5 попыток за 15 минут с одного адреса.
+// Какой способ входа сейчас включён — страница админки показывает нужную кнопку.
+router.get('/login/config', (req, res) => {
+  const telegram = telegramLoginEnabled();
+  res.json({ telegram, password: !telegram, botUsername: BOT_USERNAME });
+});
+
+// Вход через Telegram-аккаунт: страница присылает ответ виджета Telegram Login,
+// мы проверяем подпись и что этот аккаунт есть в списке ADMIN_TELEGRAM_IDS.
+// adminLoginLimiter: не больше 5 неудачных попыток за 15 минут с одного адреса.
+router.post('/login/telegram', adminLoginLimiter, (req, res) => {
+  if (!telegramLoginEnabled()) {
+    return res.status(403).json({ error: 'Вход через Telegram ещё не включён: не задана переменная ADMIN_TELEGRAM_IDS на сервере' });
+  }
+  const user = verifyLoginWidget(req.body, process.env.BOT_TOKEN);
+  if (!user) {
+    return res.status(401).json({ error: 'Telegram не подтвердил вход. Попробуйте ещё раз' });
+  }
+  if (!adminTelegramIds().has(user.id)) {
+    // Свой же ID показываем — чтобы владелец мог добавить его в список
+    return res.status(403).json({ error: 'У этого Telegram-аккаунта нет доступа к админке', telegramId: user.id });
+  }
+  const token = jwt.sign(
+    { role: 'admin', tgId: user.id, username: user.username },
+    process.env.JWT_SECRET,
+    { expiresIn: '12h', algorithm: 'HS256' },
+  );
+  notifyAdminsAboutLogin(user, req);
+  res.json({ token });
+});
+
+// Старый вход по логину/паролю — работает, только пока не включён вход через
+// Telegram (ADMIN_TELEGRAM_IDS пустая). Нужен, чтобы после обновления владелец
+// не остался без доступа, пока не задал свой Telegram ID.
 router.post('/login', adminLoginLimiter, (req, res) => {
-  const { username, password } = req.body;
-  if (username !== process.env.ADMIN_USERNAME || password !== process.env.ADMIN_PASSWORD) {
+  if (telegramLoginEnabled()) {
+    return res.status(403).json({ error: 'Вход по паролю отключён — войдите через Telegram' });
+  }
+  const { username, password } = req.body || {};
+  const expectedUser = process.env.ADMIN_USERNAME;
+  const expectedPass = process.env.ADMIN_PASSWORD;
+  // Если логин/пароль на сервере не заданы — вход закрыт (раньше пустой запрос
+  // проходил проверку, потому что "не задано" совпадало с "не прислано").
+  if (!expectedUser || !expectedPass || !safeEqual(username, expectedUser) || !safeEqual(password, expectedPass)) {
     return res.status(401).json({ error: 'Неверный логин или пароль' });
   }
-  const token = jwt.sign({ username, role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '12h' });
+  const token = jwt.sign({ username, role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '12h', algorithm: 'HS256' });
   res.json({ token });
 });
 
