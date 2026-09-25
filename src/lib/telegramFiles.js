@@ -59,4 +59,15 @@ async function streamTelegramFile(fileId, res) {
   res.send(buffer);
 }
 
-module.exports = { uploadPhotoToTelegram, streamTelegramFile };
+// Скачивает файл из Telegram целиком в память (нужно, чтобы нарисовать фото
+// на карточке "поделиться"). Возвращает Buffer или null, если файла нет.
+async function downloadTelegramFile(fileId) {
+  const infoRes = await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/getFile?file_id=${encodeURIComponent(fileId)}`);
+  const info = await infoRes.json();
+  if (!info.ok) return null;
+  const fileRes = await fetch(`https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${info.result.file_path}`);
+  if (!fileRes.ok) return null;
+  return Buffer.from(await fileRes.arrayBuffer());
+}
+
+module.exports = { uploadPhotoToTelegram, streamTelegramFile, downloadTelegramFile };
