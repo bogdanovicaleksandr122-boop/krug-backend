@@ -9,6 +9,8 @@ const publicRoutes = require('./routes/public');
 const meRoutes = require('./routes/me');
 const adminRoutes = require('./routes/admin');
 const paymentRoutes = require('./routes/payments');
+const shareRoutes = require('./routes/share');
+const { ensureFonts } = require('./lib/shareCard');
 
 const app = express();
 
@@ -50,6 +52,7 @@ app.use('/api', publicRoutes);
 app.use('/api/me', meRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api', paymentRoutes);
+app.use('/api', shareRoutes);
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
@@ -71,4 +74,11 @@ app.use((err, req, res, next) => {
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`КРУГ backend запущен на порту ${port}`));
+app.listen(port, () => {
+  console.log(`КРУГ backend запущен на порту ${port}`);
+  // Заранее скачиваем шрифты для карточек "поделиться", чтобы первый пользователь
+  // не ждал. Если не вышло — не страшно, попробуем снова при первом запросе.
+  ensureFonts()
+    .then(() => console.log('Шрифты для карточек загружены'))
+    .catch((err) => console.error('Шрифты для карточек не загрузились:', err.message));
+});
