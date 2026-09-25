@@ -29,7 +29,13 @@
 - Если сборка упала, Railway молча оставляет работать старую версию — проверять вкладку Deployments.
 
 ## Переменные окружения (Railway)
-`DATABASE_URL`, `BOT_TOKEN`, `JWT_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `ALLOWED_ORIGINS`, `TELEGRAM_WEBHOOK_SECRET`. Необязательные: `BOT_USERNAME` (по умолчанию krugspace_bot), `MINI_APP_NAME` (app), `PUBLIC_API_URL`.
+`DATABASE_URL`, `BOT_TOKEN`, `JWT_SECRET`, `ADMIN_TELEGRAM_IDS`, `ALLOWED_ORIGINS`, `TELEGRAM_WEBHOOK_SECRET`. Необязательные: `BOT_USERNAME` (по умолчанию krugspace_bot), `MINI_APP_NAME` (app), `PUBLIC_API_URL`.
+
+## Вход в админку
+- Основной вход — через Telegram-аккаунт (официальный виджет Telegram Login на `admin.html`). Разрешённые аккаунты — Telegram ID через запятую в `ADMIN_TELEGRAM_IDS`. Для работы виджета домен страницы админки привязан к боту в @BotFather (`/setdomain`).
+- Пока `ADMIN_TELEGRAM_IDS` пустая — работает старый вход по `ADMIN_USERNAME`/`ADMIN_PASSWORD` (чтобы не потерять доступ при обновлении). Как только задана — вход по паролю отключён, а старые входы по паролю перестают действовать.
+- `adminAuth` при каждом запросе сверяет `tgId` из токена со списком: убрали ID из переменной — доступ пропал сразу. Экстренный сброс всех входов — сменить `JWT_SECRET`.
+- О каждом входе бот пишет всем админам (кто, когда, IP, устройство). Логика — `src/lib/adminAccess.js`.
 
 ## Устройство кода
 - `src/server.js` — точка входа, подключение роутов, почасовое снятие истёкших PRO/буст.
