@@ -3,6 +3,8 @@ const prisma = require('../lib/prisma');
 const { telegramAuth } = require('../middleware/telegramAuth');
 const { paymentLimiter } = require('../middleware/rateLimiters');
 const { getPrices } = require('../lib/prices');
+const { handleInlineQuery } = require('../lib/inlineSearch');
+const { publicBaseUrl } = require('../lib/shareMessage');
 
 const router = express.Router();
 
@@ -84,6 +86,16 @@ router.post('/telegram/webhook', async (req, res) => {
       console.error('Не удалось подтвердить pre_checkout_query', e);
     }
     return res.sendStatus(200);
+  }
+
+  // Поиск через строку "@krugspace_bot ..." в любом чате (см. lib/inlineSearch.js).
+  // Сразу отвечаем Telegram "получено", а сам поиск делаем следом — так вебхук
+  // никогда не подвисает на медленном запросе.
+  const inlineQuery = req.body?.inline_query;
+  if (inlineQuery) {
+    res.sendStatus(200);
+    handleInlineQuery(inlineQuery, publicBaseUrl(req)).catch((e) => console.error('Inline-поиск: ошибка', e));
+    return;
   }
 
   const message = req.body?.message;
