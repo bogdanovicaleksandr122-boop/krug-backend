@@ -3,6 +3,8 @@ const prisma = require('../lib/prisma');
 const { telegramAuth } = require('../middleware/telegramAuth');
 const { uploadPhotoToTelegram } = require('../lib/telegramFiles');
 const { supportLimiter } = require('../middleware/rateLimiters');
+const { specialistStats } = require('../lib/analytics');
+const { asyncRoute } = require('../lib/asyncRoute');
 
 const router = express.Router();
 router.use(telegramAuth); // все роуты в этом файле требуют подтверждённой личности из Telegram
@@ -42,6 +44,17 @@ router.get('/specialists', async (req, res) => {
   });
   res.json(specialists);
 });
+
+// Статистика своей анкеты — только для подтверждённого владельца. Показываем
+// лишь количество (просмотры, нажатия на контакты), кто именно смотрел — не видно.
+router.get('/specialists/:id/stats', asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  const specialist = Number.isInteger(id) && id > 0 ? await prisma.specialist.findUnique({ where: { id } }) : null;
+  if (!ensureOwnership(specialist, req.telegramUser) || !specialist.verified) {
+    return res.status(403).json({ error: 'Статистика доступна только подтверждённому владельцу анкеты' });
+  }
+  res.json(await specialistStats(specialist.id, 30));
+}));
 
 const OWNER_EDITABLE_FIELDS = [
   'name', 'langs', 'about', 'services',

@@ -8,6 +8,7 @@ const { uploadPhotoToTelegram, streamTelegramFile } = require('../lib/telegramFi
 const { toPublicId, fromPublicId } = require('../lib/publicId');
 const { getPrices, setPrices } = require('../lib/prices');
 const { sendTelegramMessage } = require('../lib/telegramSend');
+const { slugify } = require('../lib/slugify');
 
 const router = express.Router();
 
@@ -314,7 +315,7 @@ router.post('/cities', async (req, res) => {
     return res.status(400).json({ error: 'Нужны название города и страна' });
   }
   try {
-    const base = slugify(label); // slugify объявлена ниже в этом же файле (function-декларации поднимаются наверх)
+    const base = slugify(label);
     let id = base;
     let n = 2;
     while (await prisma.city.findUnique({ where: { id } })) {
@@ -349,20 +350,6 @@ router.put('/cities/:id', async (req, res) => {
 
 const VALID_ICONS = ['home', 'sparkle', 'gear', 'doc', 'cap', 'cup', 'car', 'box', 'users', 'dumbbell', 'smiley', 'paw', 'building', 'briefcase', 'gift', 'heart'];
 
-// Простая транслитерация кириллицы — только чтобы получить читаемый технический id,
-// на отображение в приложении не влияет (там используется label).
-const CYRILLIC_MAP = {
-  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i',
-  й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't',
-  у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sht', ъ: 'a', ь: '', ю: 'yu', я: 'ya',
-};
-function slugify(text) {
-  const lower = String(text || '').toLowerCase();
-  let out = '';
-  for (const ch of lower) out += CYRILLIC_MAP[ch] !== undefined ? CYRILLIC_MAP[ch] : ch;
-  out = out.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  return out || 'item';
-}
 function truthy(v) {
   return ['да', 'yes', 'true', '1', 'y', 'д'].includes(String(v || '').trim().toLowerCase());
 }
@@ -576,7 +563,10 @@ router.get('/stats', async (req, res) => {
 });
 
 router.get('/users', async (req, res) => {
-  const users = await prisma.telegramUser.findMany({ orderBy: { lastSeenAt: 'desc' } });
+  const users = await prisma.telegramUser.findMany({
+    orderBy: { lastSeenAt: 'desc' },
+    include: { referralLink: { select: { name: true } } },
+  });
   res.json(users);
 });
 
@@ -625,5 +615,9 @@ router.post('/broadcast', async (req, res) => {
 
   res.json({ total: users.length, sent, failed });
 });
+
+// Статистика и рекламные ссылки — отдельный файл, чтобы этот не разрастался.
+// Подключаем после router.use(adminAuth), поэтому там тоже нужен вход в админку.
+router.use(require('./adminAnalytics'));
 
 module.exports = router;

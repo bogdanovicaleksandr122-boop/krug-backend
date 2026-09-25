@@ -2,7 +2,7 @@ const express = require('express');
 const prisma = require('../lib/prisma');
 const { createSpecialistLimiter } = require('../middleware/rateLimiters');
 const { streamTelegramFile } = require('../lib/telegramFiles');
-const { telegramAuth } = require('../middleware/telegramAuth');
+const { telegramAuth, optionalTelegramUser } = require('../middleware/telegramAuth');
 const { toPublicId } = require('../lib/publicId');
 const { getPrices } = require('../lib/prices');
 
@@ -40,7 +40,7 @@ router.get('/prices', async (req, res) => {
 });
 
 // Публичный список специалистов — только опубликованные, с фильтрами
-router.get('/specialists', async (req, res) => {
+router.get('/specialists', optionalTelegramUser, async (req, res) => {
   const { subcategoryId, categoryId, cityId, search } = req.query;
 
   const where = {
@@ -69,6 +69,21 @@ router.get('/specialists', async (req, res) => {
   }
 
   res.json([...boosted, ...pro, ...rest].map(withPublicId));
+
+  // Статистика для админки: что ищут и какие разделы открывают. Пишем только для
+  // настоящих пользователей Telegram и уже после ответа — поиск от этого не медленнее.
+  if (req.telegramUser && (search || subcategoryId)) {
+    prisma.searchLog.create({
+      data: {
+        telegramUserId: String(req.telegramUser.id),
+        kind: search ? 'text' : 'subcategory',
+        query: search ? String(search).trim().slice(0, 100) : null,
+        subcategoryId: subcategoryId ? String(subcategoryId) : null,
+        cityId: cityId ? String(cityId) : null,
+        resultsCount: specialists.length,
+      },
+    }).catch((e) => console.error('Не удалось записать статистику поиска', e));
+  }
 });
 
 // Карточка одного специалиста

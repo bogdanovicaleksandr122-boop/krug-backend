@@ -10,6 +10,7 @@ const meRoutes = require('./routes/me');
 const adminRoutes = require('./routes/admin');
 const paymentRoutes = require('./routes/payments');
 const shareRoutes = require('./routes/share');
+const trackRoutes = require('./routes/track');
 const { ensureFonts } = require('./lib/shareCard');
 const { ensureInlineUpdates } = require('./lib/inlineSearch');
 
@@ -54,6 +55,7 @@ app.use('/api/me', meRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api', paymentRoutes);
 app.use('/api', shareRoutes);
+app.use('/api', trackRoutes);
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
@@ -63,6 +65,20 @@ setInterval(async () => {
   await prisma.specialist.updateMany({ where: { pro: true, proExpiresAt: { lt: now } }, data: { pro: false } });
   await prisma.specialist.updateMany({ where: { boosted: true, boostedUntil: { lt: now } }, data: { boosted: false } });
 }, 60 * 60 * 1000);
+
+// Подробные записи статистики (открытия, просмотры, поиски) храним 13 месяцев —
+// этого хватает, чтобы сравнивать год к году, а база не растёт бесконечно.
+// Сводные цифры (сколько пользователей, откуда пришли) от этого не меняются.
+const STATS_KEEP_DAYS = 400;
+async function cleanupOldStats() {
+  const before = new Date(Date.now() - STATS_KEEP_DAYS * 24 * 60 * 60 * 1000);
+  await prisma.appOpen.deleteMany({ where: { createdAt: { lt: before } } });
+  await prisma.specialistEvent.deleteMany({ where: { createdAt: { lt: before } } });
+  await prisma.searchLog.deleteMany({ where: { createdAt: { lt: before } } });
+}
+setInterval(() => {
+  cleanupOldStats().catch((e) => console.error('Не удалось очистить старую статистику', e));
+}, 24 * 60 * 60 * 1000);
 
 // Всё, что не подошло ни под один роут
 app.use((req, res) => res.status(404).json({ error: 'Не найдено' }));

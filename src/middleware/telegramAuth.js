@@ -38,6 +38,16 @@ function verifyInitData(initData, botToken) {
   return true;
 }
 
+// Достаёт пользователя из initData, если она пришла и прошла проверку. Иначе null.
+function readTelegramUser(initData) {
+  if (!initData || !verifyInitData(initData, process.env.BOT_TOKEN)) return null;
+  try {
+    return JSON.parse(new URLSearchParams(initData).get('user'));
+  } catch {
+    return null;
+  }
+}
+
 // Middleware для роутов, которые должны знать, кто именно пишет из Telegram.
 async function telegramAuth(req, res, next) {
   const initData = req.headers['x-telegram-init-data'];
@@ -56,30 +66,33 @@ async function telegramAuth(req, res, next) {
     return res.status(400).json({ error: 'Не удалось прочитать пользователя из initData' });
   }
   req.telegramUser = user;
+  // Параметр из ссылки запуска (startapp=...) и время запуска — оба внутри подписи
+  // Telegram, поэтому им можно доверять (в отличие от того, что прислано в теле запроса).
+  req.telegramStartParam = params.get('start_param') || null;
+  req.telegramAuthDate = Number(params.get('auth_date')) || null;
+  req.isNewTelegramUser = false;
 
   // Обновляем запись о пользователе — используется только для статистики в админке,
   // на саму проверку прав это никак не влияет. Если запись не сохранилась —
   // не блокируем запрос из-за этого, только пишем в лог.
+  // Чтобы понять, новый ли это пользователь (нужно для подсчёта новичков по рекламным
+  // ссылкам), при создании записи ставим "первый визит" ровно на текущий момент:
+  // если после сохранения он совпал с этим моментом — запись только что появилась.
+  const now = new Date();
+  const profile = {
+    username: user.username || null,
+    firstName: user.first_name || null,
+    lastName: user.last_name || null,
+    languageCode: user.language_code || null,
+    lastIp: req.ip,
+  };
   try {
-    await prisma.telegramUser.upsert({
+    const saved = await prisma.telegramUser.upsert({
       where: { id: String(user.id) },
-      update: {
-        username: user.username || null,
-        firstName: user.first_name || null,
-        lastName: user.last_name || null,
-        languageCode: user.language_code || null,
-        lastIp: req.ip,
-        lastSeenAt: new Date(),
-      },
-      create: {
-        id: String(user.id),
-        username: user.username || null,
-        firstName: user.first_name || null,
-        lastName: user.last_name || null,
-        languageCode: user.language_code || null,
-        lastIp: req.ip,
-      },
+      update: { ...profile, lastSeenAt: now },
+      create: { id: String(user.id), ...profile, firstSeenAt: now, lastSeenAt: now },
     });
+    req.isNewTelegramUser = saved.firstSeenAt.getTime() === now.getTime();
   } catch (e) {
     console.error('Не удалось обновить статистику пользователя', e);
   }
@@ -87,4 +100,12 @@ async function telegramAuth(req, res, next) {
   next();
 }
 
-module.exports = { verifyInitData, telegramAuth };
+// Для публичных роутов: если запрос пришёл из Telegram с правильной подписью —
+// запоминаем пользователя (req.telegramUser), если нет — просто пропускаем дальше.
+// В базу ничего не пишет.
+function optionalTelegramUser(req, res, next) {
+  req.telegramUser = readTelegramUser(req.headers['x-telegram-init-data']);
+  next();
+}
+
+module.exports = { verifyInitData, telegramAuth, optionalTelegramUser };
