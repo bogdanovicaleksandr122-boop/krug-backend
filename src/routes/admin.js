@@ -9,6 +9,7 @@ const { toPublicId, fromPublicId } = require('../lib/publicId');
 const { getPrices, setPrices } = require('../lib/prices');
 const { sendTelegramMessage } = require('../lib/telegramSend');
 const { slugify } = require('../lib/slugify');
+const { asyncRoute } = require('../lib/asyncRoute');
 
 const router = express.Router();
 
@@ -48,16 +49,16 @@ router.use(adminAuth); // всё, что ниже, требует токен
 
 /* ================= Заявки на проверке (очередь модерации) ================= */
 
-router.get('/pending', async (req, res) => {
+router.get('/pending', asyncRoute(async (req, res) => {
   const pending = await prisma.specialist.findMany({
     where: { status: 'pending' },
     include: { category: true, subcategory: true, city: true },
     orderBy: { createdAt: 'asc' },
   });
   res.json(await attachSubmitters(pending));
-});
+}));
 
-router.post('/specialists/:id/approve', async (req, res) => {
+router.post('/specialists/:id/approve', asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const specialist = await prisma.specialist.findUnique({ where: { id } });
   if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
@@ -75,9 +76,9 @@ router.post('/specialists/:id/approve', async (req, res) => {
       .catch((e) => console.error('Не удалось отправить уведомление об одобрении', e));
   }
   res.json(updated);
-});
+}));
 
-router.post('/specialists/:id/reject', async (req, res) => {
+router.post('/specialists/:id/reject', asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const { reason } = req.body;
   const specialist = await prisma.specialist.findUnique({ where: { id } });
@@ -106,14 +107,14 @@ router.post('/specialists/:id/reject', async (req, res) => {
       .catch((e) => console.error('Не удалось отправить уведомление об отказе', e));
   }
   res.json(updated);
-});
+}));
 
 /* ================= Полное управление анкетами ================= */
 
 // Список всех анкет (любой статус) — с фильтрами по статусу и текстовому поиску.
 // Поиск теперь охватывает не только имя/специализацию, но и номер анкеты
 // (100000000042) и данные того, кто анкету подал — Telegram ID или username.
-router.get('/specialists', async (req, res) => {
+router.get('/specialists', asyncRoute(async (req, res) => {
   const { status, search } = req.query;
   const where = {};
   if (status) where.status = status;
@@ -146,9 +147,9 @@ router.get('/specialists', async (req, res) => {
     orderBy: { createdAt: 'desc' },
   });
   res.json(await attachSubmitters(specialists));
-});
+}));
 
-router.get('/specialists/:id', async (req, res) => {
+router.get('/specialists/:id', asyncRoute(async (req, res) => {
   const specialist = await prisma.specialist.findUnique({
     where: { id: Number(req.params.id) },
     include: { category: true, subcategory: true, city: true },
@@ -156,7 +157,7 @@ router.get('/specialists/:id', async (req, res) => {
   if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
   const [withSubmitter] = await attachSubmitters([specialist]);
   res.json(withSubmitter);
-});
+}));
 
 const EDITABLE_FIELDS = [
   'name', 'role', 'about', 'langs', 'services',
@@ -194,7 +195,7 @@ async function resolveOwnerId(telegramUserId) {
 
 // Ручное создание анкеты админом — в отличие от публичной формы, здесь можно сразу
 // указать статус published и вручную выставить verified/pro/boosted без оплаты.
-router.post('/specialists', async (req, res) => {
+router.post('/specialists', asyncRoute(async (req, res) => {
   const data = pickEditableFields(req.body);
   if (!data.name || !data.role || !data.categoryId || !data.subcategoryId) {
     return res.status(400).json({ error: 'Не хватает обязательных полей (имя, специализация, категория, подкатегория)' });
@@ -207,11 +208,11 @@ router.post('/specialists', async (req, res) => {
   } catch (e) {
     res.status(400).json({ error: e.isOwnerValidation ? e.message : 'Не удалось создать анкету: ' + e.message });
   }
-});
+}));
 
 // Полное ручное редактирование анкеты — админ может менять любое поле,
 // включая verified/pro/boosted без прохождения оплаты пользователем
-router.put('/specialists/:id', async (req, res) => {
+router.put('/specialists/:id', asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const data = pickEditableFields(req.body);
   data.pendingChanges = null; // ручное редактирование админом отменяет любые несогласованные правки владельца
@@ -224,9 +225,9 @@ router.put('/specialists/:id', async (req, res) => {
   } catch (e) {
     res.status(400).json({ error: e.isOwnerValidation ? e.message : 'Не удалось сохранить: ' + e.message });
   }
-});
+}));
 
-router.delete('/specialists/:id', async (req, res) => {
+router.delete('/specialists/:id', asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   try {
     await prisma.specialist.delete({ where: { id } });
@@ -234,7 +235,7 @@ router.delete('/specialists/:id', async (req, res) => {
   } catch (e) {
     res.status(400).json({ error: 'Не удалось удалить анкету' });
   }
-});
+}));
 
 // Загрузка фото админом — применяется сразу, без очереди модерации (в отличие от
 // фото, которое загружает сам владелец через /api/me/...). Получателем в Telegram,
@@ -246,7 +247,7 @@ router.delete('/specialists/:id', async (req, res) => {
 // на сообщение «от бота» в СВОЁМ ЖЕ чате, что грозило блокировкой всего бота.
 // Теперь бот никогда не отправляет загруженное фото обратно в чат того, кто его
 // прислал, — только в закрытый служебный чат, который контролирует сам владелец приложения.
-router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb' }), async (req, res) => {
+router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb' }), asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const specialist = await prisma.specialist.findUnique({ where: { id } });
   if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
@@ -265,22 +266,22 @@ router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb
   } catch (e) {
     res.status(502).json({ error: 'Не удалось загрузить фото: ' + e.message });
   }
-});
+}));
 
 // Превью фото, которое ещё не одобрено (лежит в pendingChanges) — только для админки,
 // публично оно не отдаётся, пока анкету не одобрят.
-router.get('/specialists/:id/pending-photo', async (req, res) => {
+router.get('/specialists/:id/pending-photo', asyncRoute(async (req, res) => {
   const specialist = await prisma.specialist.findUnique({ where: { id: Number(req.params.id) } });
   const fileId = specialist && specialist.pendingChanges && specialist.pendingChanges.photoFileId;
   if (!fileId) return res.status(404).json({ error: 'Нет фото на проверке' });
   res.set('Cross-Origin-Resource-Policy', 'cross-origin');
   await streamTelegramFile(fileId, res);
-});
+}));
 
 /* ================= Категории / города (редактирование) ================= */
 // Списки для чтения отдаются публичными /api/categories и /api/cities — здесь только запись.
 
-router.put('/categories/:id', async (req, res) => {
+router.put('/categories/:id', asyncRoute(async (req, res) => {
   const { label, icon, sortOrder } = req.body;
   const data = {};
   if (label !== undefined) data.label = label;
@@ -292,9 +293,9 @@ router.put('/categories/:id', async (req, res) => {
   } catch (e) {
     res.status(400).json({ error: 'Не удалось сохранить категорию' });
   }
-});
+}));
 
-router.put('/subcategories/:id', async (req, res) => {
+router.put('/subcategories/:id', asyncRoute(async (req, res) => {
   const { label, sortOrder } = req.body;
   const data = {};
   if (label !== undefined) data.label = label;
@@ -305,11 +306,11 @@ router.put('/subcategories/:id', async (req, res) => {
   } catch (e) {
     res.status(400).json({ error: 'Не удалось сохранить подкатегорию' });
   }
-});
+}));
 
 // Создание города вручную (без CSV) — например, чтобы завести новую страну
 // с несколькими городами ещё до того, как в ней появятся первые анкеты.
-router.post('/cities', async (req, res) => {
+router.post('/cities', asyncRoute(async (req, res) => {
   const { label, country, sortOrder, isDefault } = req.body;
   if (!label || !country) {
     return res.status(400).json({ error: 'Нужны название города и страна' });
@@ -329,9 +330,9 @@ router.post('/cities', async (req, res) => {
   } catch (e) {
     res.status(400).json({ error: 'Не удалось создать город: ' + e.message });
   }
-});
+}));
 
-router.put('/cities/:id', async (req, res) => {
+router.put('/cities/:id', asyncRoute(async (req, res) => {
   const { label, country, sortOrder, isDefault } = req.body;
   const data = {};
   if (label !== undefined) data.label = label;
@@ -344,7 +345,7 @@ router.put('/cities/:id', async (req, res) => {
   } catch (e) {
     res.status(400).json({ error: 'Не удалось сохранить город' });
   }
-});
+}));
 
 /* ================= Массовая загрузка через CSV ================= */
 
@@ -357,7 +358,7 @@ function truthy(v) {
 // Принимает сырой текст CSV (не JSON!) — так проще загружать файл с телефона/компьютера
 // без лишней библиотеки для отправки файлов. Если указанные страна/город/категория/
 // подкатегория ещё не существуют — создаёт их на лету.
-router.post('/specialists/bulk-csv', express.text({ type: '*/*', limit: '5mb' }), async (req, res) => {
+router.post('/specialists/bulk-csv', express.text({ type: '*/*', limit: '5mb' }), asyncRoute(async (req, res) => {
   let rows;
   try {
     rows = parse(req.body, { columns: true, skip_empty_lines: true, trim: true, bom: true });
@@ -501,11 +502,11 @@ router.post('/specialists/bulk-csv', express.text({ type: '*/*', limit: '5mb' })
     createdSubcategories: createdSubcategories.map((s) => s.label),
     errors,
   });
-});
+}));
 
 /* ================= Статистика ================= */
 
-router.get('/stats', async (req, res) => {
+router.get('/stats', asyncRoute(async (req, res) => {
   const now = new Date();
   const dayAgo = new Date(now - 24 * 60 * 60 * 1000);
   const weekAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
@@ -560,23 +561,23 @@ router.get('/stats', async (req, res) => {
       count: c._count.cityId,
     })),
   });
-});
+}));
 
-router.get('/users', async (req, res) => {
+router.get('/users', asyncRoute(async (req, res) => {
   const users = await prisma.telegramUser.findMany({
     orderBy: { lastSeenAt: 'desc' },
     include: { referralLink: { select: { name: true } } },
   });
   res.json(users);
-});
+}));
 
 // Цены PRO/буста — редактируются вручную из админки (вкладка "Цены"),
 // хранятся в таблице AppSetting, см. lib/prices.js.
-router.get('/prices', async (req, res) => {
+router.get('/prices', asyncRoute(async (req, res) => {
   res.json(await getPrices());
-});
+}));
 
-router.put('/prices', async (req, res) => {
+router.put('/prices', asyncRoute(async (req, res) => {
   const { pro_price, boost_price_7, boost_price_30 } = req.body;
   const values = { pro_price, boost_price_7, boost_price_30 };
   const isValid = Object.values(values).every((v) => v !== undefined && Number(v) > 0);
@@ -585,7 +586,7 @@ router.put('/prices', async (req, res) => {
   }
   await setPrices(values);
   res.json(await getPrices());
-});
+}));
 
 // Рассылка сообщения всем пользователям бота (для объявлений типа "добавили новый город").
 // Отправляем с небольшой паузой между сообщениями — Telegram ограничивает общий поток
@@ -593,7 +594,7 @@ router.put('/prices', async (req, res) => {
 // При росте базы до многих тысяч пользователей рассылку стоит перевести в фоновую
 // задачу — здесь она ждёт завершения в рамках одного запроса, что при сотнях
 // пользователей занимает секунды, а при десятках тысяч может быть слишком долго.
-router.post('/broadcast', async (req, res) => {
+router.post('/broadcast', asyncRoute(async (req, res) => {
   const { text } = req.body;
   if (!text || !String(text).trim()) {
     return res.status(400).json({ error: 'Введите текст рассылки' });
@@ -614,7 +615,7 @@ router.post('/broadcast', async (req, res) => {
   }
 
   res.json({ total: users.length, sent, failed });
-});
+}));
 
 // Статистика и рекламные ссылки — отдельный файл, чтобы этот не разрастался.
 // Подключаем после router.use(adminAuth), поэтому там тоже нужен вход в админку.

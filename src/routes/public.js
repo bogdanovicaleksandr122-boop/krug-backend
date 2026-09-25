@@ -5,6 +5,7 @@ const { streamTelegramFile } = require('../lib/telegramFiles');
 const { telegramAuth, optionalTelegramUser } = require('../middleware/telegramAuth');
 const { toPublicId } = require('../lib/publicId');
 const { getPrices } = require('../lib/prices');
+const { asyncRoute } = require('../lib/asyncRoute');
 
 const router = express.Router();
 
@@ -17,30 +18,30 @@ function withPublicId(specialist) {
 // Меняется только когда админ вручную правит структуру каталога (очень редко),
 // поэтому можно спокойно кэшировать на 10 минут — заметно меньше трафика на
 // каждое открытие приложения без риска долго показывать устаревший список.
-router.get('/categories', async (req, res) => {
+router.get('/categories', asyncRoute(async (req, res) => {
   const categories = await prisma.category.findMany({
     orderBy: { sortOrder: 'asc' },
     include: { subcategories: { orderBy: { sortOrder: 'asc' } } },
   });
   res.set('Cache-Control', 'public, max-age=600');
   res.json(categories);
-});
+}));
 
 // Список городов — та же логика, что и у категорий.
-router.get('/cities', async (req, res) => {
+router.get('/cities', asyncRoute(async (req, res) => {
   const cities = await prisma.city.findMany({ orderBy: { sortOrder: 'asc' } });
   res.set('Cache-Control', 'public, max-age=600');
   res.json(cities);
-});
+}));
 
 // Текущие цены PRO/буста — публичный роут, чтобы приложение показывало актуальные
 // цифры на кнопках оплаты (сами цены редактируются в админке, см. lib/prices.js).
-router.get('/prices', async (req, res) => {
+router.get('/prices', asyncRoute(async (req, res) => {
   res.json(await getPrices());
-});
+}));
 
 // Публичный список специалистов — только опубликованные, с фильтрами
-router.get('/specialists', optionalTelegramUser, async (req, res) => {
+router.get('/specialists', optionalTelegramUser, asyncRoute(async (req, res) => {
   const { subcategoryId, categoryId, cityId, search } = req.query;
 
   const where = {
@@ -84,10 +85,10 @@ router.get('/specialists', optionalTelegramUser, async (req, res) => {
       },
     }).catch((e) => console.error('Не удалось записать статистику поиска', e));
   }
-});
+}));
 
 // Карточка одного специалиста
-router.get('/specialists/:id', async (req, res) => {
+router.get('/specialists/:id', asyncRoute(async (req, res) => {
   const specialist = await prisma.specialist.findUnique({
     where: { id: Number(req.params.id) },
     include: { category: true, subcategory: true, city: true },
@@ -96,7 +97,7 @@ router.get('/specialists/:id', async (req, res) => {
     return res.status(404).json({ error: 'Анкета не найдена' });
   }
   res.json(withPublicId(specialist));
-});
+}));
 
 // Новая заявка от пользователя (мастер добавления из прототипа) — уходит на модерацию.
 // createSpecialistLimiter не даёт заваливать каталог спамом: не больше 10 заявок в час с одного адреса.
@@ -104,7 +105,7 @@ router.get('/specialists/:id', async (req, res) => {
 // (клиент мог прислать любое значение или вообще ничего — на практике фронт его никогда
 // не отправлял, поэтому у анкет никогда не было известно, кто их подал). Теперь id
 // заявителя всегда берётся из проверенной подписи initData, подделать нельзя.
-router.post('/specialists', createSpecialistLimiter, telegramAuth, async (req, res) => {
+router.post('/specialists', createSpecialistLimiter, telegramAuth, asyncRoute(async (req, res) => {
   const {
     name, langs, role, about, services,
     contactsTelegram, contactsInstagram, contactsPhone, contactsWebsite,
@@ -126,11 +127,11 @@ router.post('/specialists', createSpecialistLimiter, telegramAuth, async (req, r
   });
 
   res.status(201).json(withPublicId(specialist));
-});
+}));
 
 // Фото специалиста — проксируем через себя (напрямую отдавать ссылку Telegram нельзя,
 // в ней зашит токен бота). Отдаём только для уже опубликованных анкет.
-router.get('/specialists/:id/photo', async (req, res) => {
+router.get('/specialists/:id/photo', asyncRoute(async (req, res) => {
   const specialist = await prisma.specialist.findUnique({ where: { id: Number(req.params.id) } });
   if (!specialist || !specialist.photoFileId || specialist.status !== 'published') {
     return res.status(404).json({ error: 'Фото не найдено' });
@@ -140,6 +141,6 @@ router.get('/specialists/:id/photo', async (req, res) => {
   // этой точечной поправки браузер молча блокирует именно междоменную загрузку фото.
   res.set('Cross-Origin-Resource-Policy', 'cross-origin');
   await streamTelegramFile(specialist.photoFileId, res);
-});
+}));
 
 module.exports = router;

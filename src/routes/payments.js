@@ -5,6 +5,7 @@ const { paymentLimiter } = require('../middleware/rateLimiters');
 const { getPrices } = require('../lib/prices');
 const { handleInlineQuery } = require('../lib/inlineSearch');
 const { publicBaseUrl } = require('../lib/shareMessage');
+const { asyncRoute } = require('../lib/asyncRoute');
 
 const router = express.Router();
 
@@ -21,7 +22,7 @@ async function callTelegram(method, payload) {
 }
 
 // Покупка PRO — доступна только подтверждённому владельцу анкеты (verified)
-router.post('/specialists/:id/purchase-pro', paymentLimiter, telegramAuth, async (req, res) => {
+router.post('/specialists/:id/purchase-pro', paymentLimiter, telegramAuth, asyncRoute(async (req, res) => {
   const specialist = await prisma.specialist.findUnique({ where: { id: Number(req.params.id) } });
   if (!specialist || !specialist.verified || specialist.telegramUserId !== String(req.telegramUser.id)) {
     return res.status(403).json({ error: 'Купить PRO может только подтверждённый владелец анкеты' });
@@ -37,10 +38,10 @@ router.post('/specialists/:id/purchase-pro', paymentLimiter, telegramAuth, async
   });
 
   res.json(invoice);
-});
+}));
 
 // Покупка Буста
-router.post('/specialists/:id/purchase-boost', paymentLimiter, telegramAuth, async (req, res) => {
+router.post('/specialists/:id/purchase-boost', paymentLimiter, telegramAuth, asyncRoute(async (req, res) => {
   const { days } = req.body; // 7 или 30
   const prices = await getPrices();
   const priceByDays = { 7: prices.boost_price_7, 30: prices.boost_price_30 };
@@ -61,14 +62,14 @@ router.post('/specialists/:id/purchase-boost', paymentLimiter, telegramAuth, asy
   });
 
   res.json(invoice);
-});
+}));
 
 // Webhook от Telegram: сюда придут все апдейты бота, нас интересует successful_payment.
 // Проверяем секретный токен — без этого кто угодно мог бы дёрнуть этот адрес напрямую
 // и притвориться, что оплата прошла, получив себе бесплатный PRO/буст.
 // Секрет задаётся один раз при регистрации вебхука (см. инструкцию ниже) и
 // должен совпадать с переменной TELEGRAM_WEBHOOK_SECRET в Railway.
-router.post('/telegram/webhook', async (req, res) => {
+router.post('/telegram/webhook', asyncRoute(async (req, res) => {
   const secret = req.headers['x-telegram-bot-api-secret-token'];
   if (!process.env.TELEGRAM_WEBHOOK_SECRET || secret !== process.env.TELEGRAM_WEBHOOK_SECRET) {
     return res.sendStatus(401);
@@ -147,6 +148,6 @@ router.post('/telegram/webhook', async (req, res) => {
   }
 
   res.sendStatus(200);
-});
+}));
 
 module.exports = router;
