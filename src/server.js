@@ -11,6 +11,7 @@ const adminRoutes = require('./routes/admin');
 const paymentRoutes = require('./routes/payments');
 const shareRoutes = require('./routes/share');
 const { ensureFonts } = require('./lib/shareCard');
+const { ensureInlineUpdates } = require('./lib/inlineSearch');
 
 const app = express();
 
@@ -81,4 +82,5 @@ app.listen(port, () => {
   ensureFonts()
     .then(() => console.log('Шрифты для карточек загружены'))
     .catch((err) => console.error('Шрифты для карточек не загрузились:', err.message));
+  ensureInlineUpdates().catch((err) => console.error('Не удалось проверить вебхук:', err.message));
 });
