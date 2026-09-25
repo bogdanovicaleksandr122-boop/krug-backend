@@ -48,4 +48,14 @@ const supportLimiter = rateLimit({
   message: { error: 'Слишком много обращений подряд, попробуйте позже' },
 });
 
-module.exports = { generalLimiter, adminLoginLimiter, createSpecialistLimiter, paymentLimiter, supportLimiter };
+// Лимит на подготовку карточек "поделиться" — каждая такая заявка рисует картинку
+// и обращается к Telegram, поэтому не даём дёргать её бесконечно.
+const shareLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 минута
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Слишком много запросов, попробуйте позже' },
+});
+
+module.exports = { generalLimiter, adminLoginLimiter, createSpecialistLimiter, paymentLimiter, supportLimiter, shareLimiter };
