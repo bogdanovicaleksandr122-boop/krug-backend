@@ -13,6 +13,7 @@ const shareRoutes = require('./routes/share');
 const trackRoutes = require('./routes/track');
 const { ensureFonts } = require('./lib/shareCard');
 const { ensureInlineUpdates } = require('./lib/inlineSearch');
+const { startBackupSchedule } = require('./lib/backup');
 
 const app = express();
 
@@ -104,4 +105,6 @@ app.listen(port, () => {
     .then(() => console.log('Шрифты для карточек загружены'))
     .catch((err) => console.error('Шрифты для карточек не загрузились:', err.message));
   ensureInlineUpdates().catch((err) => console.error('Не удалось проверить вебхук:', err.message));
+  // Ежедневная копия базы владельцу в Telegram (см. lib/backup.js)
+  startBackupSchedule();
 });
