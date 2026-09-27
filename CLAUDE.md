@@ -29,7 +29,12 @@
 - Если сборка упала, Railway молча оставляет работать старую версию — проверять вкладку Deployments.
 
 ## Переменные окружения (Railway)
-`DATABASE_URL`, `BOT_TOKEN`, `JWT_SECRET`, `ADMIN_TELEGRAM_IDS`, `ALLOWED_ORIGINS`, `TELEGRAM_WEBHOOK_SECRET`. Необязательные: `BOT_USERNAME` (по умолчанию krugspace_bot), `MINI_APP_NAME` (app), `PUBLIC_API_URL`.
+`DATABASE_URL`, `BOT_TOKEN`, `JWT_SECRET`, `ADMIN_TELEGRAM_IDS`, `ALLOWED_ORIGINS`, `TELEGRAM_WEBHOOK_SECRET`. Необязательные: `BOT_USERNAME` (по умолчанию krugspace_bot), `MINI_APP_NAME` (app), `PUBLIC_API_URL`, `BACKUP_CHAT_ID` (куда слать бэкапы; по умолчанию `TELEGRAM_FILE_RELAY_CHAT_ID`).
+
+## Бэкапы базы
+- Раз в сутки сервер выгружает все таблицы (список берётся из схемы Prisma автоматически) в `krug-backup-ГГГГ-ММ-ДД.json.gz` и шлёт файлом в Telegram (`src/lib/backup.js`). Время последней копии и последняя ошибка — в `AppSetting` (`backup_last_at`, `backup_last_error`). В админке вкладка «Бэкапы»: статус, «Сделать копию сейчас», выгрузка анкет в CSV (формат совместим с «Импорт CSV»).
+- Восстановление: `npx prisma db push`, затем `node prisma/restore.js файл.json.gz` (только в пустую базу; `--wipe` — очистить и заменить). Проверено: копия → восстановление → повторная копия побайтно совпадает.
+- При изменении схемы (новые поля/таблицы) бэкап подхватит их сам; если поле переименовано/удалено — старый бэкап нужно будет подправить перед восстановлением.
 
 ## Вход в админку
 - Основной вход — через Telegram-аккаунт (официальный виджет Telegram Login на `admin.html`). Разрешённые аккаунты — Telegram ID через запятую в `ADMIN_TELEGRAM_IDS`. Для работы виджета домен страницы админки привязан к боту в @BotFather (`/setdomain`).

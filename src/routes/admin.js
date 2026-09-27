@@ -417,6 +417,11 @@ router.post('/specialists/bulk-csv', express.text({ type: '*/*', limit: '5mb' })
   if (!rows.length) {
     return res.status(400).json({ error: 'Файл пустой или без строк с данными' });
   }
+  // Выгрузка анкет (см. adminBackup.js) ставит апостроф перед текстом, похожим на
+  // формулу Excel, — снимаем его, чтобы при загрузке обратно текст вернулся как был.
+  rows = rows.map((row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [
+    k, typeof v === 'string' && /^'[=+\-@\t\r]/.test(v) ? v.slice(1) : v,
+  ])));
 
   const [existingCities, existingCategories, existingSubcategories] = await Promise.all([
     prisma.city.findMany(),
@@ -669,5 +674,7 @@ router.post('/broadcast', asyncRoute(async (req, res) => {
 // Статистика и рекламные ссылки — отдельный файл, чтобы этот не разрастался.
 // Подключаем после router.use(adminAuth), поэтому там тоже нужен вход в админку.
 router.use(require('./adminAnalytics'));
+// Бэкапы базы и выгрузка анкет в CSV
+router.use(require('./adminBackup'));
 
 module.exports = router;
