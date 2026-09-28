@@ -209,7 +209,7 @@ router.get('/specialists/:id', asyncRoute(async (req, res) => {
 }));
 
 const EDITABLE_FIELDS = [
-  'name', 'role', 'about', 'langs', 'services',
+  'name', 'role', 'about', 'services',
   'contactsTelegram', 'contactsInstagram', 'contactsPhone', 'contactsWebsite',
   'locationAddress', 'cityId', 'categoryId', 'subcategoryId', 'status', 'rejectionReason',
   'verified', 'pro', 'proExpiresAt', 'boosted', 'boostedUntil', 'telegramUserId',
@@ -517,7 +517,6 @@ router.post('/specialists/bulk-csv', express.text({ type: '*/*', limit: '5mb' })
         createdSubcategories.push(subcategory);
       }
 
-      const langs = (row.langs || '').split('|').map((s) => s.trim()).filter(Boolean);
       const services = (row.services || '').split('|').map((s) => s.trim()).filter(Boolean);
       const statusRaw = (row.status || 'published').trim().toLowerCase();
       const status = ['pending', 'published', 'rejected'].includes(statusRaw) ? statusRaw : 'published';
@@ -527,7 +526,6 @@ router.post('/specialists/bulk-csv', express.text({ type: '*/*', limit: '5mb' })
           name,
           role: (row.role || '').trim() || subcategory.label,
           about: (row.about || '').trim(),
-          langs,
           services,
           contactsTelegram: (row.contactsTelegram || '').trim() || null,
           contactsInstagram: (row.contactsInstagram || '').trim() || null,

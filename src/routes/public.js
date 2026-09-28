@@ -107,7 +107,7 @@ router.get('/specialists/:id', asyncRoute(async (req, res) => {
 // заявителя всегда берётся из проверенной подписи initData, подделать нельзя.
 router.post('/specialists', createSpecialistLimiter, telegramAuth, asyncRoute(async (req, res) => {
   const {
-    name, langs, role, about, services,
+    name, role, about, services,
     contactsTelegram, contactsInstagram, contactsPhone, contactsWebsite,
     locationAddress, cityId, categoryId, subcategoryId,
   } = req.body;
@@ -118,7 +118,7 @@ router.post('/specialists', createSpecialistLimiter, telegramAuth, asyncRoute(as
 
   const specialist = await prisma.specialist.create({
     data: {
-      name, langs, role, about, services,
+      name, role, about, services,
       contactsTelegram, contactsInstagram, contactsPhone, contactsWebsite,
       locationAddress, cityId, categoryId, subcategoryId,
       telegramUserId: String(req.telegramUser.id),

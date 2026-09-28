@@ -112,29 +112,41 @@ const DEMO_SPECIALISTS = [
 ];
 
 async function main() {
+  // Этот скрипт запускается при КАЖДОМ запуске сервера (npm start). Поэтому он только
+  // добавляет недостающее и никогда не перезаписывает существующее: раньше здесь было
+  // "обновить, если есть", и каждое обновление сервера откатывало правки из админки
+  // (названия категорий/городов) и возвращало удалённые демо-анкеты.
   for (const city of CITIES) {
-    await prisma.city.upsert({ where: { id: city.id }, update: city, create: city });
+    await prisma.city.upsert({ where: { id: city.id }, update: {}, create: city });
   }
 
   for (const cat of CATEGORIES) {
     const { subcats, ...catData } = cat;
-    await prisma.category.upsert({ where: { id: cat.id }, update: catData, create: catData });
+    await prisma.category.upsert({ where: { id: cat.id }, update: {}, create: catData });
     for (const sub of subcats) {
       await prisma.subcategory.upsert({
         where: { id: sub.id },
-        update: { ...sub, categoryId: cat.id },
+        update: {},
         create: { ...sub, categoryId: cat.id },
       });
     }
   }
 
-  for (const s of DEMO_SPECIALISTS) {
-    await prisma.specialist.upsert({
-      where: { id: s.id },
-      update: { ...s, cityId: 'sofia', status: 'published' },
-      create: { ...s, cityId: 'sofia', status: 'published' },
-    });
+  // Демо-анкеты — только в совсем пустую базу (новая установка). В рабочей базе их
+  // не трогаем: удалённые админом не возвращаются, отредактированные не откатываются.
+  if (await prisma.specialist.count() === 0) {
+    for (const s of DEMO_SPECIALISTS) {
+      const { langs, ...rest } = s; // языки анкет больше не используются
+      await prisma.specialist.create({ data: { ...rest, cityId: 'sofia', status: 'published' } });
+    }
   }
+
+  // Демо-анкеты создаются с номерами 101–109, а счётчик новых анкет начинается с 1.
+  // Без этой строки, когда в базе набралось бы ~100 анкет, новые анкеты не могли бы
+  // сохраниться (номер уже занят). Ставим счётчик после самого большого номера.
+  await prisma.$executeRawUnsafe(
+    `SELECT setval(pg_get_serial_sequence('"Specialist"', 'id'), GREATEST((SELECT MAX(id) FROM "Specialist"), 1))`,
+  );
 
   console.log('Готово: категории, города и демо-специалисты загружены.');
 }

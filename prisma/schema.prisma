@@ -44,7 +44,9 @@ model Specialist {
   id                Int               @id @default(autoincrement())
   telegramUserId    String?
   name              String
-  langs             Json
+  // Языки анкеты больше не спрашиваем и не показываем. Поле оставлено, чтобы
+  // не потерять уже сохранённые данные; для новых анкет — пустой список.
+  langs             Json             @default("[]")
   role              String
   about             String
   services          Json
