@@ -26,7 +26,7 @@ router.post('/backup/run', asyncRoute(async (req, res) => {
 // Та же раскладка колонок, что понимает "Импорт CSV" — файл можно загрузить обратно.
 // Фото, владелец анкеты и статистика в CSV не попадают (для этого есть полный бэкап).
 const CSV_COLUMNS = [
-  'country', 'city', 'category', 'subcategory', 'name', 'role', 'category_icon', 'about', 'langs', 'services',
+  'country', 'city', 'category', 'subcategory', 'name', 'role', 'category_icon', 'about', 'services',
   'contactsTelegram', 'contactsInstagram', 'contactsPhone', 'contactsWebsite', 'locationAddress',
   'status', 'verified', 'pro', 'boosted', 'public_id',
 ];
@@ -54,7 +54,7 @@ router.get('/backup/specialists.csv', asyncRoute(async (req, res) => {
   const yesNo = (v) => (v ? 'да' : 'нет');
   const rows = specialists.map((s) => [
     s.city ? s.city.country : '', s.city ? s.city.label : '', s.category.label, s.subcategory.label,
-    s.name, s.role, s.category.icon, s.about, list(s.langs), list(s.services),
+    s.name, s.role, s.category.icon, s.about, list(s.services),
     s.contactsTelegram, s.contactsInstagram, s.contactsPhone, s.contactsWebsite, s.locationAddress,
     s.status, yesNo(s.verified), yesNo(s.pro), yesNo(s.boosted), toPublicId(s.id),
   ].map(csvCell).join(','));

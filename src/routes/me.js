@@ -5,12 +5,21 @@ const { uploadPhotoToTelegram } = require('../lib/telegramFiles');
 const { supportLimiter } = require('../middleware/rateLimiters');
 const { specialistStats } = require('../lib/analytics');
 const { asyncRoute } = require('../lib/asyncRoute');
+const { sendTelegramMessage } = require('../lib/telegramSend');
+const { toPublicId } = require('../lib/publicId');
 
 const router = express.Router();
 router.use(telegramAuth); // все роуты в этом файле требуют подтверждённой личности из Telegram
 
 function ensureOwnership(specialist, telegramUser) {
   return !!specialist && specialist.telegramUserId === String(telegramUser.id);
+}
+
+// Управлять анкетой (редактировать, удалять, менять фото) может только тот, кто
+// подтвердил, что это его анкета. Человек, который просто добавил в каталог чужую
+// анкету, видит её у себя в кабинете, но менять её не может.
+function ensureVerifiedOwner(specialist, telegramUser) {
+  return ensureOwnership(specialist, telegramUser) && specialist.verified;
 }
 
 // Подтверждение владения анкетой ("это я")
@@ -37,6 +46,46 @@ router.post('/specialists/:id/claim', asyncRoute(async (req, res) => {
   });
 }));
 
+// Ручная проверка владения — для анкет без Telegram в контактах (или если Telegram
+// в анкете не совпал). Человек размещает код в Instagram/на сайте, а мы пересылаем
+// заявку владельцу приложения: он сверяет код и назначает владельца в админке.
+router.post('/specialists/:id/claim-request', supportLimiter, asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  const code = String((req.body && req.body.code) || '');
+  if (!/^KRUG-\d{4}$/.test(code) || !Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ error: 'Некорректная заявка' });
+  }
+  const specialist = await prisma.specialist.findUnique({ where: { id } });
+  if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
+  const chatId = process.env.SUPPORT_CHAT_ID || process.env.TELEGRAM_FILE_RELAY_CHAT_ID;
+  if (!chatId) {
+    return res.status(500).json({ error: 'Проверка временно недоступна — не задан адрес получателя на сервере' });
+  }
+  const u = req.telegramUser;
+  const where = [
+    specialist.contactsInstagram && `Instagram: ${specialist.contactsInstagram}`,
+    specialist.contactsWebsite && `Сайт: ${specialist.contactsWebsite}`,
+    specialist.contactsTelegram && `Telegram в анкете: ${specialist.contactsTelegram}`,
+  ].filter(Boolean);
+  const text = [
+    '🪪 Заявка на подтверждение анкеты',
+    `Анкета: «${specialist.name}» — № ${toPublicId(specialist.id)}`,
+    `От: ${u.username ? '@' + u.username : 'без username'} (${[u.first_name, u.last_name].filter(Boolean).join(' ') || 'без имени'})`,
+    `Telegram ID заявителя: ${u.id}`,
+    `Код: ${code}`,
+    '',
+    'Где проверить код:',
+    ...(where.length ? where : ['— контактов для проверки в анкете нет']),
+    '',
+    specialist.verified
+      ? '⚠️ У анкеты уже есть подтверждённый владелец — будьте внимательны.'
+      : 'Если код на месте — откройте анкету в админке и впишите Telegram ID заявителя в поле «Telegram ID владельца».',
+  ].join('\n');
+  const result = await sendTelegramMessage(chatId, text);
+  if (!result.ok) return res.status(502).json({ error: 'Не удалось отправить заявку, попробуйте позже' });
+  res.status(201).json({ ok: true });
+}));
+
 // «Мои анкеты»
 router.get('/specialists', asyncRoute(async (req, res) => {
   const specialists = await prisma.specialist.findMany({
@@ -50,14 +99,24 @@ router.get('/specialists', asyncRoute(async (req, res) => {
 router.get('/specialists/:id/stats', asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const specialist = Number.isInteger(id) && id > 0 ? await prisma.specialist.findUnique({ where: { id } }) : null;
-  if (!ensureOwnership(specialist, req.telegramUser) || !specialist.verified) {
+  if (!ensureVerifiedOwner(specialist, req.telegramUser)) {
     return res.status(403).json({ error: 'Статистика доступна только подтверждённому владельцу анкеты' });
   }
-  res.json(await specialistStats(specialist.id, 30));
+  const stats = await specialistStats(specialist.id, 30);
+  // Полная статистика (контакты, откуда смотрят, избранное) — для анкет с активным
+  // PRO или бустом. Остальным отдаём только просмотры: лишнее даже не уходит с сервера.
+  if (specialist.pro || specialist.boosted) return res.json({ ...stats, limited: false });
+  res.json({
+    limited: true,
+    periodDays: stats.periodDays,
+    views: stats.views,
+    uniqueViewers: stats.uniqueViewers,
+    daily: stats.daily.map((d) => ({ date: d.date, views: d.views })),
+  });
 }));
 
 const OWNER_EDITABLE_FIELDS = [
-  'name', 'langs', 'about', 'services',
+  'name', 'about', 'services',
   'contactsTelegram', 'contactsInstagram', 'contactsPhone', 'contactsWebsite',
   'locationAddress', 'cityId',
 ];
@@ -69,7 +128,7 @@ const OWNER_EDITABLE_FIELDS = [
 router.put('/specialists/:id', asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const specialist = await prisma.specialist.findUnique({ where: { id } });
-  if (!ensureOwnership(specialist, req.telegramUser)) {
+  if (!ensureVerifiedOwner(specialist, req.telegramUser)) {
     return res.status(403).json({ error: 'Редактировать может только подтверждённый владелец анкеты' });
   }
   const changes = {};
@@ -91,7 +150,7 @@ router.put('/specialists/:id', asyncRoute(async (req, res) => {
 router.delete('/specialists/:id', asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const specialist = await prisma.specialist.findUnique({ where: { id } });
-  if (!ensureOwnership(specialist, req.telegramUser)) {
+  if (!ensureVerifiedOwner(specialist, req.telegramUser)) {
     return res.status(403).json({ error: 'Удалить может только подтверждённый владелец анкеты' });
   }
   await prisma.specialist.delete({ where: { id } });
@@ -104,7 +163,7 @@ router.delete('/specialists/:id', asyncRoute(async (req, res) => {
 router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb' }), asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const specialist = await prisma.specialist.findUnique({ where: { id } });
-  if (!ensureOwnership(specialist, req.telegramUser)) {
+  if (!ensureVerifiedOwner(specialist, req.telegramUser)) {
     return res.status(403).json({ error: 'Загружать фото может только подтверждённый владелец анкеты' });
   }
   if (!req.body || !req.body.length) {
