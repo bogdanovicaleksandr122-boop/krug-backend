@@ -67,4 +67,13 @@ router.post('/specialists/:id/share-prepare', shareLimiter, telegramAuth, asyncR
   }
 }));
 
+// Приложение сообщает, что карточку отправить не удалось (и почему) — только пишем
+// в журнал сервера, чтобы причину было видно в логах Railway. В базу ничего не сохраняем.
+router.post('/specialists/:id/share-failed', shareLimiter, telegramAuth, (req, res) => {
+  const clean = (v, max) => String(v == null ? '' : v).replace(/[^\p{L}\p{N} _.:,\-()]/gu, '').slice(0, max);
+  console.warn(`Поделиться: карточка не отправилась (анкета ${clean(req.params.id, 12)}, пользователь ${req.telegramUser.id}, `
+    + `${clean(req.body && req.body.platform, 20)} ${clean(req.body && req.body.version, 10)}): ${clean(req.body && req.body.reason, 200)}`);
+  res.status(204).end();
+});
+
 module.exports = router;

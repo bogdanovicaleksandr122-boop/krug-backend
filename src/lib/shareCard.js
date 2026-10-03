@@ -3,7 +3,6 @@
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const { drawShareCard, W, H, FONT_DISPLAY, FONT_BODY, FONT_BODY_BOLD } = require('./shareCardDraw');
 const { downloadTelegramFile } = require('./telegramFiles');
-const { toPublicId } = require('./publicId');
 
 const COUNTRY_LABELS_RU = { Bulgaria: 'Болгария', Poland: 'Польша' };
 
@@ -53,12 +52,10 @@ function cardData(specialist) {
     : '';
   return {
     name: specialist.name,
-    role: specialist.role,
     city,
     chip: (specialist.subcategory && specialist.subcategory.label) || (specialist.category && specialist.category.label) || '',
     verified: specialist.verified,
     pro: specialist.pro,
-    publicId: toPublicId(specialist.id),
     botLink: `t.me/${process.env.BOT_USERNAME || 'krugspace_bot'}`,
   };
 }
@@ -80,13 +77,17 @@ async function render(specialist) {
   return canvas.encode('jpeg', 90);
 }
 
+// Номер версии внешнего вида карточки. Увеличивать при каждом изменении рисунка:
+// он входит в адрес картинки, иначе Telegram продолжит показывать старую из своего кэша.
+const CARD_DESIGN = 2;
+
 // Кэш готовых картинок: ключ включает время последнего изменения анкеты, так что
 // после правки анкеты картинка сама перерисуется. Храним не больше 200 штук.
 const cache = new Map();
 const CACHE_LIMIT = 200;
 
 function getShareCard(specialist) {
-  const key = `${specialist.id}:${new Date(specialist.updatedAt).getTime()}`;
+  const key = `${specialist.id}:${new Date(specialist.updatedAt).getTime()}:${CARD_DESIGN}`;
   if (cache.has(key)) return cache.get(key);
   const promise = render(specialist).catch((err) => {
     cache.delete(key);
@@ -97,4 +98,4 @@ function getShareCard(specialist) {
   return promise;
 }
 
-module.exports = { getShareCard, ensureFonts, CARD_WIDTH: W, CARD_HEIGHT: H };
+module.exports = { getShareCard, ensureFonts, CARD_WIDTH: W, CARD_HEIGHT: H, CARD_DESIGN };
