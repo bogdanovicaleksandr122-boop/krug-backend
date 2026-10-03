@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const prisma = require('./lib/prisma');
-const { generalLimiter } = require('./middleware/rateLimiters');
+const { generalLimiter, imageLimiter } = require('./middleware/rateLimiters');
 
 const publicRoutes = require('./routes/public');
 const meRoutes = require('./routes/me');
@@ -14,6 +14,8 @@ const trackRoutes = require('./routes/track');
 const { ensureFonts } = require('./lib/shareCard');
 const { ensureInlineUpdates } = require('./lib/inlineSearch');
 const { startBackupSchedule } = require('./lib/backup');
+const { startNotificationSchedule } = require('./lib/notifications');
+const { Prisma } = require('@prisma/client');
 
 const app = express();
 
@@ -50,6 +52,7 @@ app.use(express.json({ limit: '200kb' }));
 
 // Общий лимит запросов на весь API
 app.use('/api', generalLimiter);
+app.use('/api', imageLimiter);
 
 app.use('/api', publicRoutes);
 app.use('/api/me', meRoutes);
@@ -61,9 +64,13 @@ app.use('/api', trackRoutes);
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 // Раз в час снимаем истёкшие PRO/Буст статусы, чтобы они не висели вечно
+// PRO-подписку Telegram продлевает сам, но уведомление об оплате может прийти чуть
+// позже срока — поэтому подписке даём сутки запаса, чтобы PRO не мигал.
 async function expireStatuses() {
   const now = new Date();
-  await prisma.specialist.updateMany({ where: { pro: true, proExpiresAt: { lt: now } }, data: { pro: false } });
+  const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  await prisma.specialist.updateMany({ where: { pro: true, proRecurring: false, proExpiresAt: { lt: now } }, data: { pro: false } });
+  await prisma.specialist.updateMany({ where: { pro: true, proRecurring: true, proExpiresAt: { lt: dayAgo } }, data: { pro: false, proRecurring: false } });
   await prisma.specialist.updateMany({ where: { boosted: true, boostedUntil: { lt: now } }, data: { boosted: false } });
 }
 // Если база на секунду недоступна — просто пишем в лог и пробуем через час,
@@ -71,6 +78,21 @@ async function expireStatuses() {
 setInterval(() => {
   expireStatuses().catch((e) => console.error('Не удалось снять истёкшие PRO/Буст статусы', e));
 }, 60 * 60 * 1000);
+
+// Раньше правка опубликованной анкеты прятала её из каталога до проверки. Теперь
+// анкета на время проверки правки остаётся в каталоге — возвращаем в каталог те,
+// что были спрятаны по-старому (уже одобрялись раньше и ждут проверки правки).
+async function restoreHiddenEdits() {
+  const result = await prisma.specialist.updateMany({
+    where: {
+      status: 'pending',
+      NOT: { pendingChanges: { equals: Prisma.AnyNull } },
+      moderationLogs: { some: { action: { in: ['approve', 'admin-edit'] } } },
+    },
+    data: { status: 'published' },
+  });
+  if (result.count) console.log(`Возвращено в каталог анкет с правками на проверке: ${result.count}`);
+}
 
 // Подробные записи статистики (открытия, просмотры, поиски) храним 13 месяцев —
 // этого хватает, чтобы сравнивать год к году, а база не растёт бесконечно.
@@ -107,4 +129,7 @@ app.listen(port, () => {
   ensureInlineUpdates().catch((err) => console.error('Не удалось проверить вебхук:', err.message));
   // Ежедневная копия базы владельцу в Telegram (см. lib/backup.js)
   startBackupSchedule();
+  // Напоминания о конце PRO/буста и недельные сводки специалистам
+  startNotificationSchedule();
+  restoreHiddenEdits().catch((e) => console.error('Не удалось вернуть анкеты с правками в каталог', e));
 });

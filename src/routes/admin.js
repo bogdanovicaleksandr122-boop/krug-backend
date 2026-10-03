@@ -13,6 +13,8 @@ const { slugify } = require('../lib/slugify');
 const { adminTelegramIds, telegramLoginEnabled, verifyLoginWidget, notifyAdminsAboutLogin } = require('../lib/adminAccess');
 const { BOT_USERNAME } = require('../lib/shareMessage');
 const { asyncRoute } = require('../lib/asyncRoute');
+const { Prisma } = require('@prisma/client');
+const { cancelProSubscription } = require('../lib/subscriptions');
 
 const router = express.Router();
 
@@ -98,11 +100,14 @@ router.use(adminAuth); // всё, что ниже, требует токен
 
 /* ================= Заявки на проверке (очередь модерации) ================= */
 
+// В очереди: новые анкеты и правки уже опубликованных (опубликованная анкета при
+// правке остаётся в каталоге, поэтому ищем её по наличию правок, а не по статусу).
+// Анкеты с PRO — первыми: приоритетная проверка входит в PRO.
 router.get('/pending', asyncRoute(async (req, res) => {
   const pending = await prisma.specialist.findMany({
-    where: { status: 'pending' },
+    where: { OR: [{ status: 'pending' }, { NOT: { pendingChanges: { equals: Prisma.AnyNull } } }] },
     include: { category: true, subcategory: true, city: true },
-    orderBy: { createdAt: 'asc' },
+    orderBy: [{ pro: 'desc' }, { updatedAt: 'asc' }],
   });
   res.json(await attachSubmitters(pending));
 }));
@@ -121,7 +126,10 @@ router.post('/specialists/:id/approve', asyncRoute(async (req, res) => {
   const updated = await prisma.specialist.update({ where: { id }, data });
   await prisma.moderationLog.create({ data: { specialistId: id, action: 'approve' } });
   if (updated.telegramUserId) {
-    sendTelegramMessage(updated.telegramUserId, `✅ Ваша анкета «${updated.name}» опубликована в КРУГ!`)
+    const text = specialist.pendingChanges && specialist.status === 'published'
+      ? `✅ Изменения в анкете «${updated.name}» опубликованы.`
+      : `✅ Ваша анкета «${updated.name}» опубликована в КРУГ!`;
+    sendTelegramMessage(updated.telegramUserId, text)
       .catch((e) => console.error('Не удалось отправить уведомление об одобрении', e));
   }
   res.json(updated);
@@ -213,6 +221,7 @@ const EDITABLE_FIELDS = [
   'contactsTelegram', 'contactsInstagram', 'contactsPhone', 'contactsWebsite',
   'locationAddress', 'cityId', 'categoryId', 'subcategoryId', 'status', 'rejectionReason',
   'verified', 'pro', 'proExpiresAt', 'boosted', 'boostedUntil', 'telegramUserId',
+  'worksOnline', 'extraSubcategories',
 ];
 
 function pickEditableFields(body) {
@@ -222,6 +231,12 @@ function pickEditableFields(body) {
   });
   if (data.proExpiresAt) data.proExpiresAt = new Date(data.proExpiresAt);
   if (data.boostedUntil) data.boostedUntil = new Date(data.boostedUntil);
+  if ('worksOnline' in data) data.worksOnline = data.worksOnline === true;
+  if ('extraSubcategories' in data) {
+    data.extraSubcategories = Array.isArray(data.extraSubcategories)
+      ? data.extraSubcategories.filter((x) => typeof x === 'string')
+      : [];
+  }
   return data;
 }
 
@@ -279,6 +294,9 @@ router.put('/specialists/:id', asyncRoute(async (req, res) => {
 router.delete('/specialists/:id', asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   try {
+    const specialist = await prisma.specialist.findUnique({ where: { id }, select: { proRecurring: true } });
+    // Подписка PRO на удалённую анкету не должна продолжать списывать звёзды
+    if (specialist && specialist.proRecurring) await cancelProSubscription(id);
     await prisma.specialist.delete({ where: { id } });
     res.status(204).end();
   } catch (e) {
@@ -317,11 +335,13 @@ router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb
   }
 }));
 
-// Превью фото, которое ещё не одобрено (лежит в pendingChanges) — только для админки,
-// публично оно не отдаётся, пока анкету не одобрят.
+// Превью фото, которое ещё не одобрено, — только для админки: новое фото из правки
+// (pendingChanges) или фото новой анкеты, приложенное при подаче. Публично оно не
+// отдаётся, пока анкету не одобрят.
 router.get('/specialists/:id/pending-photo', asyncRoute(async (req, res) => {
   const specialist = await prisma.specialist.findUnique({ where: { id: Number(req.params.id) } });
-  const fileId = specialist && specialist.pendingChanges && specialist.pendingChanges.photoFileId;
+  const fileId = specialist && ((specialist.pendingChanges && specialist.pendingChanges.photoFileId)
+    || (specialist.status !== 'published' && specialist.photoFileId));
   if (!fileId) return res.status(404).json({ error: 'Нет фото на проверке' });
   res.set('Cross-Origin-Resource-Policy', 'cross-origin');
   await streamTelegramFile(fileId, res);
@@ -539,6 +559,7 @@ router.post('/specialists/bulk-csv', express.text({ type: '*/*', limit: '5mb' })
           verified: truthy(row.verified),
           pro: truthy(row.pro),
           boosted: truthy(row.boosted),
+          worksOnline: truthy(row.online),
         },
       });
       createdSpecialistIds.push(specialist.id);

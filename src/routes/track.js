@@ -12,7 +12,7 @@ const router = express.Router();
 
 const EVENT_TYPES = ['view', 'contact', 'share'];
 const CONTACT_TYPES = ['telegram', 'phone', 'instagram', 'website', 'map'];
-const VIEW_SOURCES = ['catalog', 'search', 'favorites', 'share', 'ref', 'cabinet', 'other'];
+const VIEW_SOURCES = ['catalog', 'search', 'favorites', 'share', 'ref', 'cabinet', 'home', 'other'];
 
 // Повторное действие того же человека с той же анкетой в течение этого времени
 // не считается ещё раз — иначе один человек, листающий туда-сюда, давал бы десятки

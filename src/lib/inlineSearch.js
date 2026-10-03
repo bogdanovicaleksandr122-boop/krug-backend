@@ -4,6 +4,7 @@
 // "Открыть анкету" (то же сообщение, что и при "поделиться" в приложении).
 const prisma = require('./prisma');
 const { buildPhotoResult, appLink } = require('./shareMessage');
+const { searchSpecialists, SEARCH_ORDER } = require('./search');
 
 const PAGE_SIZE = 20;
 
@@ -16,50 +17,9 @@ async function callTelegram(method, payload) {
   return response.json();
 }
 
-// Грубое "отрезание окончаний", чтобы "бухгалтера", "Варне", "Софии" находили
-// "бухгалтер", "Варна", "София". Для поиска по справочнику этого достаточно.
-function stem(word) {
-  if (word.length >= 6) return word.slice(0, -2);
-  if (word.length === 5) return word.slice(0, -1);
-  return word;
-}
-
-function searchWords(query) {
-  return query
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
-    .split(/\s+/)
-    .filter((w) => w.length >= 2)
-    .slice(0, 5)
-    .map(stem);
-}
-
-function wordFilter(word) {
-  const has = { contains: word, mode: 'insensitive' };
-  return {
-    OR: [
-      { name: has },
-      { role: has },
-      { about: has },
-      { category: { is: { label: has } } },
-      { subcategory: { is: { label: has } } },
-      { city: { is: { label: has } } },
-    ],
-  };
-}
-
-const ORDER = [{ boosted: 'desc' }, { pro: 'desc' }, { verified: 'desc' }, { id: 'desc' }];
-
-async function searchSpecialists(query, offset) {
-  const words = searchWords(query);
-  if (!words.length) return [];
-  return prisma.specialist.findMany({
-    where: { status: 'published', AND: words.map(wordFilter) },
-    include: { city: true },
-    orderBy: ORDER,
-    skip: offset,
-    take: PAGE_SIZE,
-  });
+// Тот же поиск, что и в приложении (см. lib/search.js)
+function searchForInline(query, offset) {
+  return searchSpecialists({ query, skip: offset, take: PAGE_SIZE, include: { city: true } });
 }
 
 // Пустой запрос (просто "@krugspace_bot"): сначала свои анкеты пользователя
@@ -83,7 +43,7 @@ async function personalSpecialists(telegramUserId) {
   return prisma.specialist.findMany({
     where: { status: 'published' },
     include: { city: true },
-    orderBy: ORDER,
+    orderBy: SEARCH_ORDER,
     take: PAGE_SIZE,
   });
 }
@@ -113,7 +73,7 @@ async function handleInlineQuery(inlineQuery, baseUrl) {
   if (!query) {
     specialists = offset ? [] : await personalSpecialists(userId);
   } else {
-    specialists = await searchSpecialists(query, offset);
+    specialists = await searchForInline(query, offset);
     if (specialists.length === PAGE_SIZE) nextOffset = String(offset + PAGE_SIZE);
   }
 

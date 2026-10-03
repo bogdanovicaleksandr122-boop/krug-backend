@@ -28,7 +28,7 @@ router.post('/backup/run', asyncRoute(async (req, res) => {
 const CSV_COLUMNS = [
   'country', 'city', 'category', 'subcategory', 'name', 'role', 'category_icon', 'about', 'services',
   'contactsTelegram', 'contactsInstagram', 'contactsPhone', 'contactsWebsite', 'locationAddress',
-  'status', 'verified', 'pro', 'boosted', 'public_id',
+  'status', 'verified', 'pro', 'boosted', 'public_id', 'online',
 ];
 
 function csvCell(value) {
@@ -56,7 +56,7 @@ router.get('/backup/specialists.csv', asyncRoute(async (req, res) => {
     s.city ? s.city.country : '', s.city ? s.city.label : '', s.category.label, s.subcategory.label,
     s.name, s.role, s.category.icon, s.about, list(s.services),
     s.contactsTelegram, s.contactsInstagram, s.contactsPhone, s.contactsWebsite, s.locationAddress,
-    s.status, yesNo(s.verified), yesNo(s.pro), yesNo(s.boosted), toPublicId(s.id),
+    s.status, yesNo(s.verified), yesNo(s.pro), yesNo(s.boosted), toPublicId(s.id), yesNo(s.worksOnline),
   ].map(csvCell).join(','));
   const date = new Date().toISOString().slice(0, 10);
   res.set('Content-Type', 'text/csv; charset=utf-8');

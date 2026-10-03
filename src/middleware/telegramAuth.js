@@ -108,4 +108,4 @@ function optionalTelegramUser(req, res, next) {
   next();
 }
 
-module.exports = { verifyInitData, telegramAuth, optionalTelegramUser };
+module.exports = { verifyInitData, readTelegramUser, telegramAuth, optionalTelegramUser };
