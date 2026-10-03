@@ -7,6 +7,13 @@ const { specialistStats } = require('../lib/analytics');
 const { asyncRoute } = require('../lib/asyncRoute');
 const { sendTelegramMessage } = require('../lib/telegramSend');
 const { toPublicId } = require('../lib/publicId');
+const {
+  PUBLIC_SELECT, toPublic, cleanListingInput, hasAnyContact, telegramHandle,
+} = require('../lib/specialistData');
+const { cancelProSubscription } = require('../lib/subscriptions');
+
+// Сколько длится бесплатный пробный буст (один раз на анкету)
+const TRIAL_BOOST_DAYS = 3;
 
 const router = express.Router();
 router.use(telegramAuth); // все роуты в этом файле требуют подтверждённой личности из Telegram
@@ -27,15 +34,17 @@ router.post('/specialists/:id/claim', asyncRoute(async (req, res) => {
   const specialist = await prisma.specialist.findUnique({ where: { id: Number(req.params.id) } });
   if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
 
-  const myUsername = req.telegramUser.username ? `@${req.telegramUser.username}` : null;
-  const matchesTelegram = myUsername && specialist.contactsTelegram === myUsername;
+  // Сравниваем без учёта больших букв и формы записи: "@Name", "name",
+  // "t.me/name" в анкете — это всё тот же аккаунт.
+  const myUsername = req.telegramUser.username ? req.telegramUser.username.toLowerCase() : null;
+  const matchesTelegram = !!myUsername && telegramHandle(specialist.contactsTelegram) === myUsername;
 
   if (matchesTelegram) {
     const updated = await prisma.specialist.update({
       where: { id: specialist.id },
       data: { telegramUserId: String(req.telegramUser.id), verified: true },
     });
-    return res.json({ verified: true, specialist: updated });
+    return res.json({ verified: true, specialist: ownView(updated) });
   }
 
   // Username не совпал — сообщаем, что нужна ручная проверка модератором
@@ -86,12 +95,33 @@ router.post('/specialists/:id/claim-request', supportLimiter, asyncRoute(async (
   res.status(201).json({ ok: true });
 }));
 
+// Как анкета выглядит для её владельца в кабинете: всё, что видно всем, плюс
+// статус проверки, правки на проверке и доступность пробного буста.
+function ownView(s) {
+  const pending = s.pendingChanges && typeof s.pendingChanges === 'object' ? s.pendingChanges : null;
+  return {
+    ...toPublic({ ...s, _count: s._count }),
+    status: s.status,
+    rejectionReason: s.rejectionReason,
+    editRejectionReason: s.editRejectionReason,
+    pendingChanges: pending,
+    hasPendingChanges: !!pending,
+    extraSubcategories: s.extraSubcategories || [],
+    proExpiresAt: s.proExpiresAt,
+    proRecurring: s.proRecurring,
+    boostedUntil: s.boostedUntil,
+    trialBoostAvailable: !!s.verified && !s.trialBoostUsedAt,
+  };
+}
+
 // «Мои анкеты»
 router.get('/specialists', asyncRoute(async (req, res) => {
   const specialists = await prisma.specialist.findMany({
     where: { telegramUserId: String(req.telegramUser.id) },
+    include: { _count: { select: { recommendations: true } } },
+    orderBy: { createdAt: 'desc' },
   });
-  res.json(specialists);
+  res.json(specialists.map(ownView));
 }));
 
 // Статистика своей анкеты — только для подтверждённого владельца. Показываем
@@ -115,35 +145,59 @@ router.get('/specialists/:id/stats', asyncRoute(async (req, res) => {
   });
 }));
 
-const OWNER_EDITABLE_FIELDS = [
-  'name', 'about', 'services',
-  'contactsTelegram', 'contactsInstagram', 'contactsPhone', 'contactsWebsite',
-  'locationAddress', 'cityId',
-];
+// Владелец редактирует свою анкету.
+// - Опубликованная анкета: правки складываются в pendingChanges и уходят на проверку,
+//   а в каталоге до проверки остаётся прежняя версия (раньше анкета пропадала).
+// - Ещё не опубликованная (на проверке или отклонена): правим саму анкету — она
+//   и так целиком проходит проверку; отклонённая снова уходит на проверку.
+// Так правки в pendingChanges всегда относятся к уже одобренной анкете, и отказ
+// в правке просто оставляет анкету как была.
+function editData(specialist, changes) {
+  if (specialist.status === 'published' || specialist.pendingChanges) {
+    return {
+      pendingChanges: { ...(specialist.pendingChanges || {}), ...changes },
+      status: specialist.status === 'rejected' ? 'pending' : specialist.status,
+    };
+  }
+  return { ...changes, status: 'pending', rejectionReason: null };
+}
 
-// Владелец редактирует свою анкету. Правки не применяются сразу — они складываются
-// в pendingChanges и уходят на проверку модератору (статус анкеты становится pending,
-// поэтому на время проверки она пропадает из общего каталога). Живые данные не трогаем,
-// чтобы при отклонении правок можно было просто откатиться к тому, что было.
 router.put('/specialists/:id', asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
-  const specialist = await prisma.specialist.findUnique({ where: { id } });
+  const specialist = Number.isInteger(id) && id > 0 ? await prisma.specialist.findUnique({ where: { id } }) : null;
   if (!ensureVerifiedOwner(specialist, req.telegramUser)) {
     return res.status(403).json({ error: 'Редактировать может только подтверждённый владелец анкеты' });
   }
-  const changes = {};
-  OWNER_EDITABLE_FIELDS.forEach((key) => {
-    if (key in req.body) changes[key] = req.body[key];
+  let changes;
+  try {
+    changes = await cleanListingInput(req.body, { partial: true });
+  } catch (e) {
+    if (e.isValidation) return res.status(400).json({ error: e.message });
+    throw e;
+  }
+  if ('extraSubcategories' in changes) {
+    if (!specialist.pro) {
+      return res.status(403).json({ error: 'Дополнительные подкатегории доступны с PRO' });
+    }
+    changes.extraSubcategories = changes.extraSubcategories.filter((sid) => sid !== specialist.subcategoryId);
+  }
+  // Ничего не поменялось по сравнению с тем, что уже есть (или уже ждёт проверки) — не отправляем
+  const current = { ...specialist, ...(specialist.pendingChanges || {}) };
+  Object.keys(changes).forEach((key) => {
+    if (JSON.stringify(current[key] ?? null) === JSON.stringify(changes[key] ?? null)) delete changes[key];
   });
   if (!Object.keys(changes).length) {
     return res.status(400).json({ error: 'Нет изменений для сохранения' });
   }
-  const pendingChanges = { ...(specialist.pendingChanges || {}), ...changes };
+  if (!hasAnyContact({ ...current, ...changes })) {
+    return res.status(400).json({ error: 'Укажите хотя бы один способ связи' });
+  }
   const updated = await prisma.specialist.update({
     where: { id },
-    data: { pendingChanges, status: 'pending' },
+    data: editData(specialist, changes),
+    include: { _count: { select: { recommendations: true } } },
   });
-  res.json({ ok: true, specialist: updated });
+  res.json({ ok: true, specialist: ownView(updated) });
 }));
 
 // Владелец удаляет свою анкету — сразу, без подтверждения модератором
@@ -153,6 +207,8 @@ router.delete('/specialists/:id', asyncRoute(async (req, res) => {
   if (!ensureVerifiedOwner(specialist, req.telegramUser)) {
     return res.status(403).json({ error: 'Удалить может только подтверждённый владелец анкеты' });
   }
+  // Подписка PRO на удалённую анкету не должна продолжать списывать звёзды
+  if (specialist.proRecurring) await cancelProSubscription(specialist.id);
   await prisma.specialist.delete({ where: { id } });
   res.status(204).end();
 }));
@@ -182,15 +238,95 @@ router.post('/specialists/:id/photo', express.raw({ type: 'image/*', limit: '8mb
   }
   try {
     const fileId = await uploadPhotoToTelegram(req.body, req.headers['content-type'], chatId);
-    const pendingChanges = { ...(specialist.pendingChanges || {}), photoFileId: fileId };
     const updated = await prisma.specialist.update({
       where: { id },
-      data: { pendingChanges, status: 'pending' },
+      data: editData(specialist, { photoFileId: fileId }),
+      include: { _count: { select: { recommendations: true } } },
     });
-    res.json({ ok: true, specialist: updated });
+    res.json({ ok: true, specialist: ownView(updated) });
   } catch (e) {
     res.status(502).json({ error: 'Не удалось загрузить фото в Telegram: ' + e.message });
   }
+}));
+
+// Фото при подаче новой анкеты. Можно только тому, кто её подал, пока она ещё
+// ждёт первой проверки (и не позже суток после подачи). Публично фото появится
+// вместе с анкетой — после одобрения модератором.
+router.post('/specialists/:id/submission-photo', express.raw({ type: 'image/*', limit: '8mb' }), asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  const specialist = Number.isInteger(id) && id > 0 ? await prisma.specialist.findUnique({ where: { id } }) : null;
+  const fresh = specialist && Date.now() - specialist.createdAt.getTime() < 24 * 60 * 60 * 1000;
+  if (!ensureOwnership(specialist, req.telegramUser) || specialist.status !== 'pending' || !fresh) {
+    return res.status(403).json({ error: 'Фото можно добавить только к своей новой анкете до проверки' });
+  }
+  if (!req.body || !req.body.length) return res.status(400).json({ error: 'Файл не получен' });
+  // Фото прогоняется только через служебный чат владельца приложения (см. объяснение выше)
+  const chatId = process.env.TELEGRAM_FILE_RELAY_CHAT_ID;
+  if (!chatId) {
+    return res.status(500).json({ error: 'Загрузка фото временно недоступна — не задана переменная TELEGRAM_FILE_RELAY_CHAT_ID на сервере' });
+  }
+  try {
+    const fileId = await uploadPhotoToTelegram(req.body, req.headers['content-type'], chatId);
+    await prisma.specialist.update({ where: { id }, data: { photoFileId: fileId } });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(502).json({ error: 'Не удалось загрузить фото в Telegram: ' + e.message });
+  }
+}));
+
+// Бесплатный пробный буст на несколько дней — один раз на анкету, только
+// подтверждённому владельцу опубликованной анкеты без активного буста.
+router.post('/specialists/:id/trial-boost', asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  const specialist = Number.isInteger(id) && id > 0 ? await prisma.specialist.findUnique({ where: { id } }) : null;
+  if (!ensureVerifiedOwner(specialist, req.telegramUser)) {
+    return res.status(403).json({ error: 'Доступно только подтверждённому владельцу анкеты' });
+  }
+  if (specialist.status !== 'published') return res.status(400).json({ error: 'Анкета ещё не опубликована' });
+  if (specialist.boosted) return res.status(400).json({ error: 'Буст уже активен' });
+  const until = new Date(Date.now() + TRIAL_BOOST_DAYS * 24 * 60 * 60 * 1000);
+  // Условие trialBoostUsedAt = null прямо в запросе: два быстрых нажатия не дадут два буста
+  const result = await prisma.specialist.updateMany({
+    where: { id, trialBoostUsedAt: null },
+    data: { boosted: true, boostedUntil: until, trialBoostUsedAt: new Date(), boostReminderFor: null },
+  });
+  if (!result.count) return res.status(400).json({ error: 'Пробный буст для этой анкеты уже был' });
+  res.json({ ok: true, boostedUntil: until, days: TRIAL_BOOST_DAYS });
+}));
+
+// «Рекомендую»: один голос от одного аккаунта за анкету. Свою анкету рекомендовать нельзя.
+router.post('/specialists/:id/recommend', asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  const userId = String(req.telegramUser.id);
+  const specialist = Number.isInteger(id) && id > 0
+    ? await prisma.specialist.findFirst({ where: { id, status: 'published' }, select: { id: true, telegramUserId: true, verified: true } })
+    : null;
+  if (!specialist) return res.status(404).json({ error: 'Анкета не найдена' });
+  if (specialist.verified && specialist.telegramUserId === userId) {
+    return res.status(400).json({ error: 'Свою анкету рекомендовать нельзя' });
+  }
+  await prisma.recommendation.upsert({
+    where: { telegramUserId_specialistId: { telegramUserId: userId, specialistId: id } },
+    update: {},
+    create: { telegramUserId: userId, specialistId: id },
+  });
+  res.json({ ok: true, count: await prisma.recommendation.count({ where: { specialistId: id } }) });
+}));
+
+router.delete('/specialists/:id/recommend', asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(404).json({ error: 'Анкета не найдена' });
+  await prisma.recommendation.deleteMany({ where: { telegramUserId: String(req.telegramUser.id), specialistId: id } });
+  res.json({ ok: true, count: await prisma.recommendation.count({ where: { specialistId: id } }) });
+}));
+
+// Какие анкеты этот пользователь уже рекомендовал (только номера)
+router.get('/recommendations', asyncRoute(async (req, res) => {
+  const rows = await prisma.recommendation.findMany({
+    where: { telegramUserId: String(req.telegramUser.id) },
+    select: { specialistId: true },
+  });
+  res.json(rows.map((r) => r.specialistId));
 }));
 
 // Пользователь прочитал уведомление об отклонённой правке — прячем его из кабинета.
@@ -208,40 +344,40 @@ router.post('/specialists/:id/dismiss-edit-rejection', asyncRoute(async (req, re
   res.json({ ok: true, specialist: updated });
 }));
 
-// Избранное
+// Избранное. Добавить можно только опубликованную анкету, а в списке избранного
+// показываются только опубликованные и только их публичные поля (раньше через
+// избранное можно было прочитать анкету на проверке целиком).
 router.post('/specialists/:id/favorite', asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  const exists = Number.isInteger(id) && id > 0
+    ? await prisma.specialist.findFirst({ where: { id, status: 'published' }, select: { id: true } })
+    : null;
+  if (!exists) return res.status(404).json({ error: 'Анкета не найдена' });
+  const userId = String(req.telegramUser.id);
   await prisma.favorite.upsert({
-    where: {
-      telegramUserId_specialistId: {
-        telegramUserId: String(req.telegramUser.id),
-        specialistId: Number(req.params.id),
-      },
-    },
+    where: { telegramUserId_specialistId: { telegramUserId: userId, specialistId: id } },
     update: {},
-    create: {
-      telegramUserId: String(req.telegramUser.id),
-      specialistId: Number(req.params.id),
-    },
+    create: { telegramUserId: userId, specialistId: id },
   });
   res.status(204).end();
 }));
 
 router.delete('/specialists/:id/favorite', asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(204).end();
   await prisma.favorite.deleteMany({
-    where: {
-      telegramUserId: String(req.telegramUser.id),
-      specialistId: Number(req.params.id),
-    },
+    where: { telegramUserId: String(req.telegramUser.id), specialistId: id },
   });
   res.status(204).end();
 }));
 
 router.get('/favorites', asyncRoute(async (req, res) => {
   const favorites = await prisma.favorite.findMany({
-    where: { telegramUserId: String(req.telegramUser.id) },
-    include: { specialist: true },
+    where: { telegramUserId: String(req.telegramUser.id), specialist: { status: 'published' } },
+    include: { specialist: { select: PUBLIC_SELECT } },
+    orderBy: { createdAt: 'desc' },
   });
-  res.json(favorites.map((f) => f.specialist));
+  res.json(favorites.map((f) => toPublic(f.specialist)));
 }));
 
 // Обращение в поддержку из раздела "Поддержка". Пересылаем сообщение владельцу

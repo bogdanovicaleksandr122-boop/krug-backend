@@ -69,6 +69,20 @@ model Specialist {
   boostedUntil      DateTime?
   photoFileId       String?
   pendingChanges    Json?
+  // Работает онлайн или выезжает по всей стране — анкета показывается во всех
+  // городах той же страны, а не только в своём.
+  worksOnline       Boolean          @default(false)
+  // Дополнительные подкатегории (id) — возможность PRO: пока PRO активен, анкета
+  // показывается и в них. После окончания PRO список сохраняется, но не действует.
+  extraSubcategories String[]        @default([])
+  // PRO оформлен подпиской: Telegram сам списывает звёзды каждый месяц
+  proRecurring      Boolean          @default(false)
+  // Про какой срок окончания PRO/буста уже отправили напоминание "скоро закончится"
+  // (чтобы не напоминать дважды; после продления срок новый — напомним снова)
+  proReminderFor    DateTime?
+  boostReminderFor  DateTime?
+  // Когда владелец взял бесплатный пробный буст (один раз на анкету)
+  trialBoostUsedAt  DateTime?
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
 
@@ -79,6 +93,7 @@ model Specialist {
   payments       Payment[]
   moderationLogs ModerationLog[]
   events         SpecialistEvent[]
+  recommendations Recommendation[]
 
   // Без этих индексов с ростом каталога до тысяч анкет главный запрос приложения —
   // "покажи опубликованные анкеты этой подкатегории в этом городе" — начал бы
@@ -96,6 +111,18 @@ model Favorite {
   @@id([telegramUserId, specialistId])
 }
 
+// "Рекомендую": один голос от одного аккаунта Telegram за анкету, без текста
+// и оценок. На карточке показывается только количество.
+model Recommendation {
+  telegramUserId String
+  specialistId   Int
+  createdAt      DateTime   @default(now())
+  specialist     Specialist @relation(fields: [specialistId], references: [id], onDelete: Cascade)
+
+  @@id([telegramUserId, specialistId])
+  @@index([specialistId])
+}
+
 model Admin {
   id           Int    @id @default(autoincrement())
   username     String @unique
@@ -108,15 +135,23 @@ enum PaymentType {
   boost
 }
 
+// История платежей не удаляется вместе с анкетой: если владелец удалил анкету,
+// у платежа просто пропадает ссылка на неё (имя анкеты сохранено в specialistName).
 model Payment {
   id                      Int         @id @default(autoincrement())
-  specialistId            Int
+  specialistId            Int?
+  specialistName          String?
+  telegramUserId          String?     // кто заплатил
   type                    PaymentType
   starsAmount             Int
   durationDays            Int?
   telegramPaymentChargeId String?
+  isSubscription          Boolean     @default(false) // оплата PRO подпиской (первая или продление)
+  isRenewal               Boolean     @default(false) // автоматическое продление подписки
   createdAt               DateTime    @default(now())
-  specialist              Specialist  @relation(fields: [specialistId], references: [id], onDelete: Cascade)
+  specialist              Specialist? @relation(fields: [specialistId], references: [id], onDelete: SetNull)
+
+  @@index([telegramPaymentChargeId])
 }
 
 model ModerationLog {
