@@ -263,18 +263,15 @@ function drawMain(ctx, data) {
   }
   const nameLH = Math.round(nameSize * 1.2);
 
-  ctx.font = `30px ${FONT_BODY}`;
-  const role = data.role ? wrapLines(ctx, data.role, maxW, 2) : { lines: [] };
-  const roleLH = 40;
-
   const chips = [];
   if (data.chip) chips.push({ text: data.chip, filled: true });
   if (data.pro) chips.push({ text: 'PRO', filled: false });
   const chipsH = chips.length ? 46 : 0;
 
-  const gapRole = role.lines.length ? 18 : 0;
+  // Специализация показывается только плашкой (отдельной строкой под именем она
+  // повторяла то же самое)
   const gapChips = chips.length ? 30 : 0;
-  const blockH = name.lines.length * nameLH + gapRole + role.lines.length * roleLH + gapChips + chipsH;
+  const blockH = name.lines.length * nameLH + gapChips + chipsH;
   let y = Math.max(170, centerY - blockH / 2);
 
   ctx.textAlign = 'left';
@@ -284,14 +281,6 @@ function drawMain(ctx, data) {
   for (const line of name.lines) {
     ctx.fillText(line, x, y);
     y += nameLH;
-  }
-
-  y += gapRole;
-  ctx.fillStyle = COLORS.soft;
-  ctx.font = `30px ${FONT_BODY}`;
-  for (const line of role.lines) {
-    ctx.fillText(line, x, y);
-    y += roleLH;
   }
 
   y += gapChips;
@@ -319,11 +308,6 @@ function drawFooter(ctx, data) {
 
   const y = 586;
   ctx.textBaseline = 'middle';
-  ctx.font = `22px ${FONT_BODY}`;
-  ctx.fillStyle = COLORS.muted;
-  ctx.textAlign = 'left';
-  if (data.publicId) ctx.fillText(`Анкета № ${data.publicId}`, PAD, y);
-
   ctx.font = `22px ${FONT_BODY_BOLD}`;
   ctx.fillStyle = COLORS.white;
   ctx.textAlign = 'right';
@@ -331,7 +315,7 @@ function drawFooter(ctx, data) {
   ctx.textAlign = 'left';
 }
 
-// data: { name, role, city, chip, verified, pro, publicId, botLink }
+// data: { name, city, chip, verified, pro, botLink }
 // photo: загруженная картинка (или null — тогда рисуем инициалы)
 function drawShareCard(ctx, data, photo) {
   drawBackground(ctx);

@@ -2,7 +2,7 @@
 // Используется и кнопкой "поделиться" в приложении (routes/share.js), и поиском
 // через строку @krugspace_bot в любом чате (lib/inlineSearch.js) — поэтому
 // в обоих случаях в чат уходит одинаковое сообщение.
-const { CARD_WIDTH, CARD_HEIGHT } = require('./shareCard');
+const { CARD_WIDTH, CARD_HEIGHT, CARD_DESIGN } = require('./shareCard');
 
 const BOT_USERNAME = process.env.BOT_USERNAME || 'krugspace_bot';
 const MINI_APP_NAME = process.env.MINI_APP_NAME || 'app';
@@ -22,7 +22,7 @@ function appLink(startParam) {
 
 // specialist должен быть загружен вместе с city (include: { city: true }).
 function buildPhotoResult(specialist, baseUrl, resultId) {
-  const version = new Date(specialist.updatedAt).getTime();
+  const version = `${new Date(specialist.updatedAt).getTime()}-${CARD_DESIGN}`;
   const photoUrl = `${baseUrl}/api/specialists/${specialist.id}/share-card.jpg?v=${version}`;
   const cityText = specialist.city ? specialist.city.label : '';
   const caption = [`${specialist.name} — ${specialist.role}`, cityText ? `📍 ${cityText}` : '']
